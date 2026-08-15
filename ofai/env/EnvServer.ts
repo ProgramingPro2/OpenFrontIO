@@ -202,22 +202,28 @@ net
   .createServer((socket) => {
     console.error("[env-server] client connected");
     const decoder = new FrameDecoder();
+    // Serialize handlers: overlapping `data` events must not interleave
+    // step/reset on the same AgentEnv instances.
+    let chain: Promise<void> = Promise.resolve();
     socket.on("data", (chunk) => {
       const frames = decoder.push(chunk);
       for (const frame of frames) {
         const tensors = frameTensors(frame);
-        server
-          .handle(frame.header, tensors)
-          .then((reply) => socket.write(reply))
-          .catch((err) => {
-            console.error("[env-server] error:", err);
-            socket.write(
-              encodeFrame({ type: "error", error: String(err?.message ?? err) }),
-            );
-          });
+        chain = chain.then(async () => {
+          try {
+            const reply = await server.handle(frame.header, tensors);
+            socket.write(reply);
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error("[env-server] error:", message);
+            socket.write(encodeFrame({ type: "error", error: message }));
+          }
+        });
       }
     });
-    socket.on("error", () => process.exit(0));
+    socket.on("error", (err) => {
+      console.error("[env-server] socket error:", err);
+    });
   })
   .listen(port, () => {
     console.error(`[env-server] listening on port ${port}`);
