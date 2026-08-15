@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
 import { AgentEnv } from "../env/AgentEnv";
 import {
+  ACTION_ATTACK,
   ACTION_SPAWN,
   EnvConfig,
   NUM_REGIONS,
@@ -109,6 +110,60 @@ describe("AgentEnv", () => {
     const h2 = await run();
     expect(h1).not.toBeNull();
     expect(h1).toBe(h2);
+  }, 120000);
+
+  it("wilderness invasion (ATTACK target=0) grows territory after spawn", async () => {
+    // Regression test for the expansion bug: ATTACK was previously only able
+    // to target other players, so the agent could never invade uninhabited
+    // land and myTilesFrac stayed 0 forever. target==0 is reinterpreted as
+    // TerraNullius (wilderness) and conquers from our border.
+    const env = await AgentEnv.create(testConfig({ maxTicks: 6000 }), terrain);
+    let obs = env.peekObs();
+    // Spawn in a region with unowned land.
+    const spawnRegion = firstSetRegion(obs.spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    obs = r.obs;
+    expect(r.info.spawned).toBe(true);
+
+    // Repeatedly attack wilderness in the region with the most unowned land,
+    // using the largest troop fraction, until territory grows.
+    const startTiles = r.info.tilesFrac;
+    let grew = false;
+    let sawAttackLegal = false;
+    for (let i = 0; i < 120 && !r.done; i++) {
+      obs = r.obs;
+      if (obs.actionMask[ACTION_ATTACK] === 1 && obs.targetMask[0] === 1) {
+        sawAttackLegal = true;
+      }
+      // Pick the region with the most spawnable (unowned) land.
+      let bestRegion = 0;
+      let best = -1;
+      for (let g = 0; g < NUM_REGIONS; g++) {
+        if (obs.spawnRegions[g] > best) {
+          best = obs.spawnRegions[g];
+          bestRegion = g;
+        }
+      }
+      r = env.step({
+        actionType: ACTION_ATTACK,
+        target: 0, // wilderness
+        region: bestRegion,
+        quantity: 4, // 80% of troops
+        unit: 0,
+      });
+      if (r.info.tilesFrac > startTiles) {
+        grew = true;
+        break;
+      }
+    }
+    expect(sawAttackLegal).toBe(true);
+    expect(grew).toBe(true);
   }, 120000);
 
   it("random policies terminate episodes with valid info", async () => {

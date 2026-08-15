@@ -109,6 +109,8 @@ class Server {
         return this.step(header, blobs);
       case "reset":
         return this.reset(header);
+      case "frame":
+        return this.frame(header);
       case "close":
         setTimeout(() => process.exit(0), 100);
         return encodeFrame({ type: "closed" });
@@ -183,6 +185,24 @@ class Server {
     return encodeFrame(
       { type: "reset", index },
       obsTensors(stackObs([obs]), 1),
+    );
+  }
+
+  private frame(header: Record<string, unknown>): Buffer {
+    const index = (header.index as number) ?? 0;
+    const f = this.envs[index].renderFrame();
+    // Units are small and variable-length; send as JSON in the header.
+    // The map cells are the big payload and go as a u8 tensor.
+    return encodeFrame(
+      {
+        type: "frame",
+        width: f.width,
+        height: f.height,
+        players: f.players,
+        units: f.units,
+        tick: f.tick,
+      },
+      { cells: { dtype: "u8", data: f.cells } },
     );
   }
 }

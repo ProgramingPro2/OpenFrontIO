@@ -122,13 +122,56 @@ export class ActionTranslator {
     action: ActionVec,
     slots: (Player | null)[],
   ): Intent[] {
-    const target = slots[action.target];
-    if (target === null || target.id() === me.id()) return [];
-    if (!me.canAttackPlayer(target)) return [];
     const frac = TROOP_FRACTIONS[action.quantity] ?? 0.15;
     const troops = Math.floor(me.troops() * frac);
     if (troops < 1) return [];
+
+    // Slot 0 is the agent itself; reinterpreting target==0 as "wilderness"
+    // (TerraNullius) is what unlocks expansion into uninhabited land — the
+    // core expansion mechanic. The region head selects where: we verify the
+    // chosen region actually borders unowned land adjacent to us, else noop.
+    if (action.target === 0) {
+      if (!this.regionHasAdjacentWilderness(game, me, action.region)) {
+        return [];
+      }
+      return [
+        {
+          type: "attack",
+          targetID: game.terraNullius().id(),
+          troops,
+        },
+      ];
+    }
+
+    const target = slots[action.target];
+    if (target === null || target.id() === me.id()) return [];
+    if (!me.canAttackPlayer(target)) return [];
     return [{ type: "attack", targetID: target.id(), troops }];
+  }
+
+  /**
+   * True when the given coarse region contains unowned land that borders any
+   * of my tiles — i.e. a wilderness invasion there would actually expand us.
+   */
+  private regionHasAdjacentWilderness(
+    game: Game,
+    me: Player,
+    region: number,
+  ): boolean {
+    const [x0, y0, x1, y1] = this.regionBounds(game, region);
+    const myID = me.smallID();
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const tile = game.ref(x, y);
+        if (!game.isLand(tile) || game.isImpassable(tile)) continue;
+        if (game.hasOwner(tile)) continue; // wilderness = unowned
+        // Adjacent to one of my border tiles?
+        for (const n of game.map().neighbors(tile)) {
+          if (game.map().ownerID(n) === myID) return true;
+        }
+      }
+    }
+    return false;
   }
 
   private retreatAll(me: Player): Intent[] {

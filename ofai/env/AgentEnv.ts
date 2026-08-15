@@ -231,6 +231,13 @@ export class AgentEnv {
 
     const tm = this.obs.targetMask;
     tm.fill(0);
+
+    // Wilderness (TerraNullius) is attackable via target slot 0 whenever any
+    // of my border tiles touches unowned land. This is the core expansion
+    // path; without it the policy can never grow territory.
+    const bordersWilderness = this.hasAdjacentWilderness(me);
+    if (bordersWilderness) tm[0] = 1; // slot 0 == wilderness target for ATTACK
+
     let anyAttackTarget = false;
     let anyAllyTarget = false;
     let anyEmbargoTarget = false;
@@ -269,7 +276,7 @@ export class AgentEnv {
       }
     }
 
-    am[2] = anyAttackTarget ? 1 : 0;
+    am[2] = anyAttackTarget || bordersWilderness ? 1 : 0;
     am[3] = me.outgoingAttacks().length > 0 ? 1 : 0;
     am[4] = anyUnit && me.numTilesOwned() > 0 ? 1 : 0;
     am[5] = this.obs.boatRegions.some((v) => v === 1) && me.troops() > 100 ? 1 : 0;
@@ -277,6 +284,28 @@ export class AgentEnv {
     am[7] = me.allies().length > 0 ? 1 : 0;
     am[8] = anyEmbargoTarget ? 1 : 0;
     void NUM_ACTION_TYPES;
+  }
+
+  /**
+   * True when any of my border tiles is adjacent to unowned, passable land —
+   * i.e. a wilderness invasion is possible. Drives the ATTACK legality mask.
+   */
+  private hasAdjacentWilderness(me: Player): boolean {
+    const map = this.game.map();
+    const myID = me.smallID();
+    for (const tile of me.borderTiles()) {
+      if (map.ownerID(tile) !== myID) continue;
+      for (const n of map.neighbors(tile)) {
+        if (
+          map.isLand(n) &&
+          !map.isImpassable(n) &&
+          !map.hasOwner(n)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   step(action: ActionVec): StepResult {
@@ -385,5 +414,88 @@ export class AgentEnv {
 
   gameTicks(): number {
     return this.game.ticks();
+  }
+
+  /**
+   * Full-resolution render of the real game map for the watch viewer.
+   * Returns a color-index buffer (one byte per tile: 0=ocean, 1=impassable,
+   * 2=unowned land, 3..=player index+3) plus a roster mapping indices to
+   * player names/tiles so Python can build a legend and palette.
+   */
+  renderFrame(): {
+    width: number;
+    height: number;
+    cells: Uint8Array;
+    units: Array<{ x: number; y: number; owner: number; type: number }>;
+    players: Array<{
+      idx: number;
+      name: string;
+      tiles: number;
+      alive: boolean;
+      isAgent: boolean;
+    }>;
+    tick: number;
+  } {
+    const game = this.game;
+    const map = game.map();
+    const w = game.width();
+    const h = game.height();
+    const cells = new Uint8Array(w * h);
+
+    // Roster: unique owner smallIDs in order of territory size.
+    const players = game
+      .players()
+      .sort((a, b) => b.numTilesOwned() - a.numTilesOwned());
+    const idxBySmallID = new Map<number, number>();
+    players.forEach((p, i) => idxBySmallID.set(p.smallID(), i));
+
+    for (let ref = 0; ref < w * h; ref++) {
+      if (!map.isLand(ref)) {
+        cells[ref] = 0; // ocean
+      } else if (map.isImpassable(ref)) {
+        cells[ref] = 1; // impassable background
+      } else {
+        const owner = map.ownerID(ref);
+        if (owner === 0) {
+          cells[ref] = 2; // unowned land
+        } else {
+          const idx = idxBySmallID.get(owner);
+          cells[ref] = idx === undefined ? 2 : 3 + idx;
+        }
+        if (map.hasFallout(ref)) cells[ref] = 250; // fallout overlay
+      }
+    }
+
+    const units: Array<{ x: number; y: number; owner: number; type: number }> =
+      [];
+    for (const u of game.units()) {
+      if (!u.isActive()) continue;
+      const t = u.tile();
+      const owner = u.owner();
+      units.push({
+        x: t % w,
+        y: (t / w) | 0,
+        owner:
+          owner.isPlayer() && idxBySmallID.has(owner.smallID())
+            ? (idxBySmallID.get(owner.smallID()) as number)
+            : -1,
+        type: u.type() as number,
+      });
+    }
+
+    return {
+      width: w,
+      height: h,
+      cells,
+      units,
+      players: players.map((p, i) => ({
+        idx: i,
+        name: p.displayName(),
+        tiles: p.numTilesOwned(),
+        alive: p.isAlive(),
+        isAgent: p.id() === this.me.id(),
+      })),
+      tick: game.ticks(),
+    };
   }
 }
