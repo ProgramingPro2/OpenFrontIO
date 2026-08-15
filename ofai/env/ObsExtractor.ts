@@ -1,13 +1,12 @@
 /**
  * Builds the fixed-size observation for the agent from live game state.
  *
- * Spatial planes are produced by a single pass over the map's packed tile
- * state buffer (ownerID bits 0-11, fallout bit 13, defense bit 14), area-
- * averaged into SPATIAL_SIZE x SPATIAL_SIZE bins. Terrain planes (land,
- * mountain) are static per game and cached per reset.
- *
- * Everything is written into caller-owned buffers so repeated steps allocate
- * nothing.
+ * Performance design: the sim emits packed per-tile state deltas every tick
+ * (GameUpdateViewData.packedTileUpdates). We keep a full-res mirror of the
+ * tile state plus per-bin counters, and apply those deltas incrementally, so
+ * the per-decision cost is O(changed tiles) rather than O(map). A full pass
+ * happens only on reset() and when the agent's alliance set changes (ally
+ * plane reclassification).
  */
 import {
   Game,
@@ -16,7 +15,7 @@ import {
   Relation,
   UnitType,
 } from "../../src/core/game/Game";
-import { TileRef } from "../../src/core/game/GameMap";
+import { GameMap, TileRef } from "../../src/core/game/GameMap";
 import {
   NUM_PLAYER_SLOTS,
   NUM_REGIONS,
@@ -55,6 +54,8 @@ const NUKE_TYPES: readonly UnitType[] = [
   UnitType.MIRVWarhead,
 ];
 
+const PLANE = SPATIAL_SIZE * SPATIAL_SIZE;
+
 export interface ObsBuffers {
   spatial: Float32Array; // [SPATIAL_CHANNELS, SPATIAL_SIZE, SPATIAL_SIZE]
   players: Float32Array; // [NUM_PLAYER_SLOTS, PLAYER_FEATURES]
@@ -69,7 +70,7 @@ export interface ObsBuffers {
 
 export function makeObsBuffers(): ObsBuffers {
   return {
-    spatial: new Float32Array(SPATIAL_CHANNELS * SPATIAL_SIZE * SPATIAL_SIZE),
+    spatial: new Float32Array(SPATIAL_CHANNELS * PLANE),
     players: new Float32Array(NUM_PLAYER_SLOTS * PLAYER_FEATURES),
     global: new Float32Array(GLOBAL_FEATURES),
     actionMask: new Uint8Array(9),
@@ -81,55 +82,211 @@ export function makeObsBuffers(): ObsBuffers {
   };
 }
 
+// Per-bin dynamic counters (index by bin = by * SPATIAL_SIZE + bx).
+// mine / enemy / ally are ownership fractions; border/fallout/defense are
+// counts normalized by bin size at writeout.
+class BinState {
+  counts = new Float32Array(PLANE); // total tiles per bin (static)
+  mine = new Float32Array(PLANE);
+  enemy = new Float32Array(PLANE);
+  ally = new Float32Array(PLANE);
+  myBorder = new Float32Array(PLANE);
+  fallout = new Float32Array(PLANE);
+  defense = new Float32Array(PLANE);
+}
+
 export class ObsExtractor {
   // Static terrain planes, rebuilt on reset.
-  private landBins = new Float32Array(SPATIAL_SIZE * SPATIAL_SIZE);
-  private mountainBins = new Float32Array(SPATIAL_SIZE * SPATIAL_SIZE);
-  private binCounts = new Float32Array(SPATIAL_SIZE * SPATIAL_SIZE);
+  private landBins = new Float32Array(PLANE);
+  private mountainBins = new Float32Array(PLANE);
+
+  private bins = new BinState();
+
+  // Full-res mirror of the packed tile state (owner/fallout/defense bits).
+  private mirror = new Uint16Array(0);
+
+  // Per-region counters backing the three region masks.
+  private regionMyTiles = new Int32Array(NUM_REGIONS);
+  private regionUnownedLand = new Int32Array(NUM_REGIONS);
+  private regionEnemyShore = new Int32Array(NUM_REGIONS);
 
   private mapW = 0;
   private mapH = 0;
+  private mySmallID = 0;
+  private allySmallIDs = new Set<number>();
+  // Neighbor scratch for border maintenance (N, S, W, E offsets).
+  private neighborScratch: TileRef[] = [0, 0, 0, 0];
 
-  /** Rebuild static terrain planes. Call once per game (maps are per-reset). */
-  buildStatic(game: Game): void {
-    this.landBins.fill(0);
-    this.mountainBins.fill(0);
-    this.binCounts.fill(0);
+  /** Full rebuild of every maintained structure. Call once per game. */
+  buildStatic(game: Game, me: Player): void {
+    const map = game.map();
     this.mapW = game.width();
     this.mapH = game.height();
-    const map = game.map();
+    this.mySmallID = me.smallID();
+    this.allySmallIDs = new Set(me.allies().map((a) => a.smallID()));
+
+    this.landBins.fill(0);
+    this.mountainBins.fill(0);
+    this.bins = new BinState();
+    this.regionMyTiles.fill(0);
+    this.regionUnownedLand.fill(0);
+    this.regionEnemyShore.fill(0);
+
     const n = this.mapW * this.mapH;
+    if (this.mirror.length !== n) this.mirror = new Uint16Array(n);
+    const state = map.tileStateBuffer();
+    this.mirror.set(state);
+
     for (let ref = 0; ref < n; ref++) {
       const bin = this.binOf(ref);
-      this.binCounts[bin]++;
-      if (map.isLand(ref)) {
+      this.bins.counts[bin]++;
+      const land = map.isLand(ref);
+      if (land) {
         this.landBins[bin]++;
         const t = map.terrainType(ref);
-        // TerrainType: Plains, Highland, Mountain (plus water types).
-        if (t === 1 || t === 2) this.mountainBins[bin]++;
+        if (t === 1 || t === 2) this.mountainBins[bin]++; // Highland/Mountain
+      }
+      this.accumulateInitial(game, ref, this.mirror[ref], land);
+    }
+    for (let i = 0; i < PLANE; i++) {
+      if (this.bins.counts[i] > 0) {
+        this.landBins[i] /= this.bins.counts[i];
+        this.mountainBins[i] /= this.bins.counts[i];
       }
     }
-    for (let i = 0; i < this.binCounts.length; i++) {
-      if (this.binCounts[i] > 0) {
-        this.landBins[i] /= this.binCounts[i];
-        this.mountainBins[i] /= this.binCounts[i];
+  }
+
+  private accumulateInitial(
+    game: Game,
+    ref: TileRef,
+    s: number,
+    land: boolean,
+  ): void {
+    const bin = this.binOf(ref);
+    const owner = s & 0x0fff;
+    const region = this.regionOf(ref);
+    if (owner !== 0) {
+      if (owner === this.mySmallID) {
+        this.bins.mine[bin]++;
+        this.regionMyTiles[region]++;
+        if (game.isBorder(ref)) {
+          this.bins.myBorder[bin]++;
+          this.mirror[ref] |= 0x8000; // border-counted sentinel bit
+        }
+      } else if (this.allySmallIDs.has(owner)) {
+        this.bins.ally[bin]++;
+      } else {
+        this.bins.enemy[bin]++;
       }
+    } else if (land) {
+      this.regionUnownedLand[region]++;
+    }
+    if (s & 0x2000) this.bins.fallout[bin]++;
+    if (s & 0x4000) this.bins.defense[bin]++;
+    if (owner !== this.mySmallID && game.isShoreline(ref)) {
+      this.regionEnemyShore[region]++;
+    }
+  }
+
+  /**
+   * Apply packed tile deltas from one tick. `packed` holds [ref, state]
+   * uint32 pairs; state low 16 bits match tileStateBuffer bits.
+   */
+  applyTileUpdates(game: Game, packed: Uint32Array): void {
+    const map = game.map();
+    for (let i = 0; i < packed.length; i += 2) {
+      const ref = packed[i];
+      const s = packed[i + 1] & 0xffff;
+      this.transition(game, ref, this.mirror[ref], s);
+      this.mirror[ref] = s;
+      // Ownership changes can flip border status of cardinal neighbors.
+      const nCount = map.neighbors4(ref, this.neighborScratch);
+      for (let j = 0; j < nCount; j++) {
+        this.refreshBorder(map, this.neighborScratch[j]);
+      }
+      this.refreshBorder(map, ref);
+    }
+  }
+
+  private transition(game: Game, ref: TileRef, oldS: number, newS: number): void {
+    if (oldS === newS) return;
+    const bin = this.binOf(ref);
+    const region = this.regionOf(ref);
+    const map = game.map();
+    const land = map.isLand(ref);
+
+    // Subtract old classification.
+    const oldOwner = oldS & 0x0fff;
+    if (oldOwner !== 0) {
+      if (oldOwner === this.mySmallID) {
+        this.bins.mine[bin]--;
+        this.regionMyTiles[region]--;
+      } else if (this.allySmallIDs.has(oldOwner)) {
+        this.bins.ally[bin]--;
+      } else {
+        this.bins.enemy[bin]--;
+      }
+    } else if (land) {
+      this.regionUnownedLand[region]--;
+    }
+    if (oldS & 0x2000) this.bins.fallout[bin]--;
+    if (oldS & 0x4000) this.bins.defense[bin]--;
+    const oldShore =
+      oldOwner !== this.mySmallID && land && map.isShoreline(ref);
+    if (oldShore) this.regionEnemyShore[region]--;
+
+    // Add new classification (border handled separately via refreshBorder).
+    const newOwner = newS & 0x0fff;
+    if (newOwner !== 0) {
+      if (newOwner === this.mySmallID) {
+        this.bins.mine[bin]++;
+        this.regionMyTiles[region]++;
+      } else if (this.allySmallIDs.has(newOwner)) {
+        this.bins.ally[bin]++;
+      } else {
+        this.bins.enemy[bin]++;
+      }
+    } else if (land) {
+      this.regionUnownedLand[region]++;
+    }
+    if (newS & 0x2000) this.bins.fallout[bin]++;
+    if (newS & 0x4000) this.bins.defense[bin]++;
+    const newShore =
+      newOwner !== this.mySmallID && land && map.isShoreline(ref);
+    if (newShore) this.regionEnemyShore[region]++;
+  }
+
+  /** Recompute my-border membership for one tile after ownership changed. */
+  private refreshBorder(map: GameMap, ref: TileRef): void {
+    const s = this.mirror[ref];
+    const owner = s & 0x0fff;
+    const bin = this.binOf(ref);
+    // Border status for "my" tiles only. The counted state is tracked in the
+    // mirror's spare high bit (bit 15 is unused by the game).
+    const nowBorder = owner === this.mySmallID && owner !== 0 && map.isBorder(ref);
+    const counted = (s & 0x8000) !== 0;
+    if (nowBorder && !counted) {
+      this.mirror[ref] = s | 0x8000;
+      this.bins.myBorder[bin]++;
+    } else if (!nowBorder && counted) {
+      this.mirror[ref] = s & ~0x8000;
+      this.bins.myBorder[bin]--;
     }
   }
 
   private binOf(ref: TileRef): number {
     const x = ref % this.mapW;
     const y = (ref / this.mapW) | 0;
-    const bx = Math.min(SPATIAL_SIZE - 1, (x * SPATIAL_SIZE / this.mapW) | 0);
-    const by = Math.min(SPATIAL_SIZE - 1, (y * SPATIAL_SIZE / this.mapH) | 0);
+    const bx = Math.min(SPATIAL_SIZE - 1, ((x * SPATIAL_SIZE) / this.mapW) | 0);
+    const by = Math.min(SPATIAL_SIZE - 1, ((y * SPATIAL_SIZE) / this.mapH) | 0);
     return by * SPATIAL_SIZE + bx;
   }
 
   private regionOf(ref: TileRef): number {
     const x = ref % this.mapW;
     const y = (ref / this.mapW) | 0;
-    const rx = Math.min(REGION_GRID - 1, (x * REGION_GRID / this.mapW) | 0);
-    const ry = Math.min(REGION_GRID - 1, (y * REGION_GRID / this.mapH) | 0);
+    const rx = Math.min(REGION_GRID - 1, ((x * REGION_GRID) / this.mapW) | 0);
+    const ry = Math.min(REGION_GRID - 1, ((y * REGION_GRID) / this.mapH) | 0);
     return ry * REGION_GRID + rx;
   }
 
@@ -138,58 +295,37 @@ export class ObsExtractor {
    * Returns the ordered list of players placed into slots (slot 0 = me).
    */
   extract(game: Game, me: Player, out: ObsBuffers): (Player | null)[] {
-    const map = game.map();
-    const state = map.tileStateBuffer();
-    const mySmallID = me.smallID();
-    const allies = new Set(me.allies().map((a) => a.smallID()));
-
-    const dyn = new Float32Array(6 * SPATIAL_SIZE * SPATIAL_SIZE);
-    const counts = new Float32Array(SPATIAL_SIZE * SPATIAL_SIZE);
-    const n = this.mapW * this.mapH;
-    for (let ref = 0; ref < n; ref++) {
-      const s = state[ref];
-      const owner = s & 0x0fff;
-      const bin = this.binOf(ref);
-      counts[bin]++;
-      if (owner !== 0) {
-        if (owner === mySmallID) {
-          dyn[0 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // mine
-          if (map.isBorder(ref)) {
-            dyn[3 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // my border
-          }
-          out.buildRegions[this.regionOf(ref)] = 1;
-        } else if (allies.has(owner)) {
-          dyn[2 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // ally
-        } else {
-          dyn[1 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // enemy
-        }
-      } else if (map.isLand(ref)) {
-        out.spawnRegions[this.regionOf(ref)] = 1;
-      }
-      if (s & 0x2000) dyn[4 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // fallout
-      if (s & 0x4000) dyn[5 * SPATIAL_SIZE * SPATIAL_SIZE + bin]++; // defense
-      if (map.isShoreline(ref) && owner !== mySmallID) {
-        out.boatRegions[this.regionOf(ref)] = 1;
-      }
+    // Alliance changes reclassify tiles between ally/enemy planes; rebuild.
+    const alliesNow = new Set(me.allies().map((a) => a.smallID()));
+    if (
+      alliesNow.size !== this.allySmallIDs.size ||
+      ![...alliesNow].every((id) => this.allySmallIDs.has(id))
+    ) {
+      this.buildStatic(game, me);
     }
 
     const spatial = out.spatial;
-    const planeSize = SPATIAL_SIZE * SPATIAL_SIZE;
-    spatial.set(this.landBins, CH_LAND * planeSize);
-    spatial.set(this.mountainBins, CH_MOUNTAIN * planeSize);
-    for (let i = 0; i < planeSize; i++) {
-      const c = counts[i] > 0 ? counts[i] : 1;
-      spatial[CH_MINE * planeSize + i] = dyn[0 * planeSize + i] / c;
-      spatial[CH_ENEMY * planeSize + i] = dyn[1 * planeSize + i] / c;
-      spatial[CH_ALLY * planeSize + i] = dyn[2 * planeSize + i] / c;
-      spatial[CH_MY_BORDER * planeSize + i] = dyn[3 * planeSize + i] / c;
-      spatial[CH_FALLOUT * planeSize + i] = dyn[4 * planeSize + i] / c;
-      spatial[CH_DEFENSE * planeSize + i] = dyn[5 * planeSize + i] / c;
+    spatial.set(this.landBins, CH_LAND * PLANE);
+    spatial.set(this.mountainBins, CH_MOUNTAIN * PLANE);
+    const b = this.bins;
+    for (let i = 0; i < PLANE; i++) {
+      const c = b.counts[i] > 0 ? b.counts[i] : 1;
+      spatial[CH_MINE * PLANE + i] = b.mine[i] / c;
+      spatial[CH_ENEMY * PLANE + i] = b.enemy[i] / c;
+      spatial[CH_ALLY * PLANE + i] = b.ally[i] / c;
+      spatial[CH_MY_BORDER * PLANE + i] = b.myBorder[i] / c;
+      spatial[CH_FALLOUT * PLANE + i] = b.fallout[i] / c;
+      spatial[CH_DEFENSE * PLANE + i] = b.defense[i] / c;
     }
-    spatial.fill(0, CH_MY_STRUCTURES * planeSize, (CH_MY_STRUCTURES + 1) * planeSize);
-    spatial.fill(0, CH_ENEMY_STRUCTURES * planeSize, (CH_ENEMY_STRUCTURES + 1) * planeSize);
+    spatial.fill(0, CH_MY_STRUCTURES * PLANE, (CH_MY_STRUCTURES + 1) * PLANE);
+    spatial.fill(
+      0,
+      CH_ENEMY_STRUCTURES * PLANE,
+      (CH_ENEMY_STRUCTURES + 1) * PLANE,
+    );
 
     // Rasterize units: structures into mine/enemy planes.
+    const mySmallID = me.smallID();
     for (const unit of game.units(...STRUCTURE_TYPES, ...NUKE_TYPES)) {
       if (!unit.isActive()) continue;
       const bin = this.binOf(unit.tile());
@@ -197,11 +333,15 @@ export class ObsExtractor {
       const isMine = owner.isPlayer() && owner.smallID() === mySmallID;
       if (STRUCTURE_TYPES.includes(unit.type())) {
         const ch = isMine ? CH_MY_STRUCTURES : CH_ENEMY_STRUCTURES;
-        spatial[ch * planeSize + bin] = Math.min(
-          1,
-          spatial[ch * planeSize + bin] + 0.34,
-        );
+        spatial[ch * PLANE + bin] = Math.min(1, spatial[ch * PLANE + bin] + 0.34);
       }
+    }
+
+    // Region masks from counters.
+    for (let r = 0; r < NUM_REGIONS; r++) {
+      out.spawnRegions[r] = this.regionUnownedLand[r] > 0 ? 1 : 0;
+      out.buildRegions[r] = this.regionMyTiles[r] > 0 ? 1 : 0;
+      out.boatRegions[r] = this.regionEnemyShore[r] > 0 ? 1 : 0;
     }
 
     // Player slots: 0 = me, then others sorted by tiles owned.

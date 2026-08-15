@@ -5,7 +5,7 @@
  */
 
 export const SPATIAL_CHANNELS = 10;
-export const SPATIAL_SIZE = 128; // planes are SPATIAL_SIZE x SPATIAL_SIZE
+export const SPATIAL_SIZE = 64; // planes are SPATIAL_SIZE x SPATIAL_SIZE
 export const NUM_PLAYER_SLOTS = 16; // slot 0 is always the agent
 export const PLAYER_FEATURES = 14;
 export const GLOBAL_FEATURES = 10;

@@ -103,6 +103,10 @@ export class AgentEnv {
       this.fatalError = gu.errMsg;
       return;
     }
+    // Incremental obs maintenance (guaranteed after init by reset()).
+    if (this.me !== undefined) {
+      this.extractor.applyTileUpdates(this.game, gu.packedTileUpdates);
+    }
     const conquests = gu.updates[GameUpdateType.ConquestEvent];
     if (conquests !== undefined) {
       for (const c of conquests) {
@@ -186,7 +190,7 @@ export class AgentEnv {
     this.prevTilesFrac = 0;
     this.prevKills = 0;
     this.spawnedOnce = false;
-    this.extractor.buildStatic(this.game);
+    this.extractor.buildStatic(this.game, this.me);
     // Let tribes/nations place their spawns before the agent's first decision.
     this.runTicks(5);
     return this.extractObs();

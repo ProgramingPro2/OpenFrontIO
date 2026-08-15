@@ -10,6 +10,8 @@ import {
   ACTION_SPAWN,
   EnvConfig,
   NUM_REGIONS,
+  SPATIAL_CHANNELS,
+  SPATIAL_SIZE,
 } from "../env/spec";
 import { TerrainCache } from "../env/TerrainCache";
 
@@ -43,7 +45,7 @@ describe("AgentEnv", () => {
   it("creates an env and produces a valid initial observation", async () => {
     const env = await AgentEnv.create(testConfig(), terrain);
     const obs = env.peekObs();
-    expect(obs.spatial.length).toBe(10 * 128 * 128);
+    expect(obs.spatial.length).toBe(SPATIAL_CHANNELS * SPATIAL_SIZE * SPATIAL_SIZE);
     expect(obs.players.length).toBe(16 * 14);
     expect(obs.global.length).toBe(10);
     // Spawn phase: only noop + spawn are legal.
@@ -52,7 +54,9 @@ describe("AgentEnv", () => {
     expect(obs.actionMask[2]).toBe(0);
     // Land plane has content.
     let landSum = 0;
-    for (let i = 0; i < 128 * 128; i++) landSum += obs.spatial[i];
+    for (let i = 0; i < SPATIAL_SIZE * SPATIAL_SIZE; i++) {
+      landSum += obs.spatial[i];
+    }
     expect(landSum).toBeGreaterThan(0);
     // Some spawn region must be available.
     expect(obs.spawnRegions.some((v) => v === 1)).toBe(true);
