@@ -11,6 +11,8 @@ import {
   ACTION_SPAWN,
   EnvConfig,
   NUM_REGIONS,
+  REWARD_ATTACK_START,
+  REWARD_DEATH,
   SPATIAL_CHANNELS,
   SPATIAL_SIZE,
 } from "../env/spec";
@@ -164,6 +166,91 @@ describe("AgentEnv", () => {
     }
     expect(sawAttackLegal).toBe(true);
     expect(grew).toBe(true);
+  }, 120000);
+
+  it("pays attack-start once and shaping on growth; no-op does not farm", async () => {
+    const env = await AgentEnv.create(
+      testConfig({ maxTicks: 6000, shaping: 5 }),
+      terrain,
+    );
+    const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    expect(r.info.spawned).toBe(true);
+    const startTiles = r.info.tilesFrac;
+
+    let startPaid = false;
+    let grewWithShaping = false;
+    for (let i = 0; i < 120 && !r.done; i++) {
+      let bestRegion = 0;
+      let best = -1;
+      for (let g = 0; g < NUM_REGIONS; g++) {
+        if (r.obs.spawnRegions[g] > best) {
+          best = r.obs.spawnRegions[g];
+          bestRegion = g;
+        }
+      }
+      r = env.step({
+        actionType: ACTION_ATTACK,
+        target: 0,
+        region: bestRegion,
+        quantity: 4,
+        unit: 0,
+      });
+      if (r.reward >= REWARD_ATTACK_START - 1e-6) startPaid = true;
+      if (r.info.tilesFrac > startTiles && r.reward > REWARD_ATTACK_START) {
+        grewWithShaping = true;
+        break;
+      }
+    }
+    expect(startPaid).toBe(true);
+    expect(grewWithShaping).toBe(true);
+
+    const noop = env.step({
+      actionType: 0,
+      target: 0,
+      region: 0,
+      quantity: 0,
+      unit: 0,
+    });
+    // Same attack still running: no second start bonus. Incoming/income/shaping
+    // can move the number, but it must stay below a fresh attack-start.
+    expect(noop.reward).toBeLessThan(REWARD_ATTACK_START);
+  }, 120000);
+
+  it("timeout without expansion is death-sized, not -0.25", async () => {
+    const env = await AgentEnv.create(
+      testConfig({ maxTicks: 80, bots: 0, nations: "disabled", shaping: 0 }),
+      terrain,
+    );
+    const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    expect(r.info.spawned).toBe(true);
+    while (!r.done) {
+      r = env.step({
+        actionType: 0,
+        target: 0,
+        region: 0,
+        quantity: 0,
+        unit: 0,
+      });
+    }
+    // No-expand timeout uses REWARD_DEATH, not REWARD_TIMEOUT_ALIVE. Last-step
+    // incoming/income can nudge it, but it must stay near death, not -0.25.
+    expect(r.done).toBe(true);
+    expect(r.reward).toBeLessThan(-0.5);
+    expect(r.reward).toBeGreaterThan(REWARD_DEATH - 0.2);
   }, 120000);
 
   it("random policies terminate episodes with valid info", async () => {

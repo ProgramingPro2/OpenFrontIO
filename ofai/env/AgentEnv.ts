@@ -18,6 +18,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../src/core/game/Game";
 import { createGame } from "../../src/core/game/GameImpl";
 import { createNationsForGame } from "../../src/core/game/NationCreation";
@@ -35,10 +36,17 @@ import { makeObsBuffers, ObsBuffers, ObsExtractor } from "./ObsExtractor";
 import { TerrainCache } from "./TerrainCache";
 import {
   EnvConfig,
+  EXPAND_EPS,
   NUM_ACTION_TYPES,
   NUM_PLAYER_SLOTS,
   NUM_UNIT_TYPES,
+  REWARD_ATTACK_START,
+  REWARD_BOAT_START,
+  REWARD_BUILD_START,
   REWARD_DEATH,
+  REWARD_INCOME,
+  REWARD_INCOMING,
+  REWARD_INCOMING_CAP,
   REWARD_LOSS_ALIVE,
   REWARD_TIMEOUT_ALIVE,
   REWARD_WIN,
@@ -76,6 +84,13 @@ export class AgentEnv {
   private prevKills = 0;
   private spawnedOnce = false;
   private wasSpawned = false;
+  private prevAttackIds = new Set<string>();
+  private prevIncomingIds = new Set<string>();
+  private prevBoats = 0;
+  private prevBuilt = 0;
+  private prevTroopRate = 0;
+  private spawnTilesFrac = 0;
+  private peakTilesFrac = 0;
   private slots: (Player | null)[] = [];
   resetCount = 0;
 
@@ -192,6 +207,13 @@ export class AgentEnv {
     this.prevKills = 0;
     this.spawnedOnce = false;
     this.wasSpawned = false;
+    this.prevAttackIds = new Set();
+    this.prevIncomingIds = new Set();
+    this.prevBoats = 0;
+    this.prevBuilt = 0;
+    this.prevTroopRate = 0;
+    this.spawnTilesFrac = 0;
+    this.peakTilesFrac = 0;
     this.extractor.buildStatic(this.game, this.me);
     // Let tribes/nations place their spawns before the agent's first decision.
     this.runTicks(5);
@@ -308,6 +330,61 @@ export class AgentEnv {
     return false;
   }
 
+  private attackIds(list: { id(): string }[]): Set<string> {
+    const ids = new Set<string>();
+    for (const a of list) ids.add(a.id());
+    return ids;
+  }
+
+  private builtCount(me: Player): number {
+    let n = 0;
+    for (const t of UNIT_HEAD_ORDER) n += me.unitsConstructed(t);
+    return n;
+  }
+
+  /** Tiny bonuses for newly started effects; incoming-attack penalty; income. */
+  private activityRewards(): number {
+    const me = this.me;
+    let reward = 0;
+
+    const attackIds = this.attackIds(me.outgoingAttacks());
+    for (const id of attackIds) {
+      if (!this.prevAttackIds.has(id)) {
+        reward += REWARD_ATTACK_START;
+        break;
+      }
+    }
+    this.prevAttackIds = attackIds;
+
+    const boats = me.unitCount(UnitType.TransportShip);
+    if (boats > this.prevBoats) reward += REWARD_BOAT_START;
+    this.prevBoats = boats;
+
+    const built = this.builtCount(me);
+    if (built > this.prevBuilt) reward += REWARD_BUILD_START;
+    this.prevBuilt = built;
+
+    const incomingIds = this.attackIds(me.incomingAttacks());
+    let incomingPenalty = 0;
+    for (const id of incomingIds) {
+      if (!this.prevIncomingIds.has(id)) incomingPenalty += REWARD_INCOMING;
+    }
+    this.prevIncomingIds = incomingIds;
+    if (incomingPenalty < REWARD_INCOMING_CAP) incomingPenalty = REWARD_INCOMING_CAP;
+    reward += incomingPenalty;
+
+    if (this.spawnedOnce && this.prevTroopRate > 0) {
+      const rate = this.game.config().troopIncreaseRate(me);
+      const denom = Math.max(this.prevTroopRate, 1);
+      const delta = (rate - this.prevTroopRate) / denom;
+      const clipped = Math.max(-1, Math.min(1, delta));
+      reward += REWARD_INCOME * clipped;
+      this.prevTroopRate = rate;
+    }
+
+    return reward;
+  }
+
   step(action: ActionVec): StepResult {
     const game = this.game;
     const wasAlive = this.me.isAlive();
@@ -334,6 +411,7 @@ export class AgentEnv {
 
     const landTiles = Math.max(1, game.numLandTiles());
     const tilesFrac = this.me.numTilesOwned() / landTiles;
+    this.peakTilesFrac = Math.max(this.peakTilesFrac, tilesFrac);
 
     let reward = 0;
     let done = false;
@@ -366,8 +444,12 @@ export class AgentEnv {
     }
     if (!done && game.ticks() >= this.cfg.maxTicks) {
       done = true;
-      if (this.me.isAlive()) reward += REWARD_TIMEOUT_ALIVE;
-      else {
+      if (this.me.isAlive()) {
+        // Sitting still until the clock runs out is otherwise better than
+        // fighting and dying (-0.25 vs -1). Treat a no-expand timeout as death.
+        const grew = this.peakTilesFrac > this.spawnTilesFrac + EXPAND_EPS;
+        reward += grew ? REWARD_TIMEOUT_ALIVE : REWARD_DEATH;
+      } else {
         dead = true;
         reward += REWARD_DEATH;
       }
@@ -378,6 +460,8 @@ export class AgentEnv {
     // actually own land.
     if (!this.wasSpawned && this.spawnedOnce) {
       reward += 0.1;
+      this.spawnTilesFrac = tilesFrac;
+      this.prevTroopRate = game.config().troopIncreaseRate(this.me);
     }
     this.wasSpawned = this.spawnedOnce;
 
@@ -391,6 +475,8 @@ export class AgentEnv {
       reward += this.cfg.shaping * (tilesFrac - this.prevTilesFrac);
     }
     this.prevTilesFrac = tilesFrac;
+
+    reward += this.activityRewards();
 
     return {
       obs: this.extractObs(),
