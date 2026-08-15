@@ -54,6 +54,13 @@ const NUKE_TYPES: readonly UnitType[] = [
   UnitType.MIRVWarhead,
 ];
 
+// Naval units share the structure planes: a warship or an inbound transport
+// is exactly the kind of "enemy unit presence" the policy must see coming.
+const NAVAL_TYPES: readonly UnitType[] = [
+  UnitType.Warship,
+  UnitType.TransportShip,
+];
+
 const PLANE = SPATIAL_SIZE * SPATIAL_SIZE;
 
 export interface ObsBuffers {
@@ -324,14 +331,21 @@ export class ObsExtractor {
       (CH_ENEMY_STRUCTURES + 1) * PLANE,
     );
 
-    // Rasterize units: structures into mine/enemy planes.
+    // Rasterize units: structures and naval units into mine/enemy planes.
     const mySmallID = me.smallID();
-    for (const unit of game.units(...STRUCTURE_TYPES, ...NUKE_TYPES)) {
+    for (const unit of game.units(
+      ...STRUCTURE_TYPES,
+      ...NUKE_TYPES,
+      ...NAVAL_TYPES,
+    )) {
       if (!unit.isActive()) continue;
       const bin = this.binOf(unit.tile());
       const owner = unit.owner();
       const isMine = owner.isPlayer() && owner.smallID() === mySmallID;
-      if (STRUCTURE_TYPES.includes(unit.type())) {
+      if (
+        STRUCTURE_TYPES.includes(unit.type()) ||
+        NAVAL_TYPES.includes(unit.type())
+      ) {
         const ch = isMine ? CH_MY_STRUCTURES : CH_ENEMY_STRUCTURES;
         spatial[ch * PLANE + bin] = Math.min(1, spatial[ch * PLANE + bin] + 0.34);
       }
