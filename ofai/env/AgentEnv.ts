@@ -75,6 +75,7 @@ export class AgentEnv {
   private prevTilesFrac = 0;
   private prevKills = 0;
   private spawnedOnce = false;
+  private wasSpawned = false;
   private slots: (Player | null)[] = [];
   resetCount = 0;
 
@@ -190,6 +191,7 @@ export class AgentEnv {
     this.prevTilesFrac = 0;
     this.prevKills = 0;
     this.spawnedOnce = false;
+    this.wasSpawned = false;
     this.extractor.buildStatic(this.game, this.me);
     // Let tribes/nations place their spawns before the agent's first decision.
     this.runTicks(5);
@@ -309,6 +311,17 @@ export class AgentEnv {
     let win = false;
     let dead = false;
 
+    // Spawn window ended without the agent ever taking land: the episode is
+    // unrecoverable (isAlive() == tiles.size > 0) and would otherwise drift
+    // for thousands of ticks as a ghost. Terminate immediately with a death
+    // penalty so the policy gets a clean "spawn on land first" gradient
+    // instead of a long tail of meaningless -1 returns.
+    if (!this.spawnedOnce && !game.inSpawnPhase()) {
+      done = true;
+      dead = true;
+      reward += REWARD_DEATH;
+    }
+
     const winner = game.getWinner();
     if (winner !== null) {
       done = true;
@@ -330,6 +343,15 @@ export class AgentEnv {
         reward += REWARD_DEATH;
       }
     }
+    // Reward the spawn step explicitly: random policy flips a coin on
+    // spawn/noop during the spawn window, and without a positive signal the
+    // shaping gradient is flat (tilesFrac stays 0). +0.1 the first time we
+    // actually own land.
+    if (!this.wasSpawned && this.spawnedOnce) {
+      reward += 0.1;
+    }
+    this.wasSpawned = this.spawnedOnce;
+
     // Per-kill bonus, normalized by starting opponent count.
     if (this.kills > this.prevKills) {
       const opponents = Math.max(1, game.allPlayers().length - 1);
