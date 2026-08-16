@@ -128,10 +128,15 @@ export class ActionTranslator {
 
     // Slot 0 is the agent itself; reinterpreting target==0 as "wilderness"
     // (TerraNullius) is what unlocks expansion into uninhabited land — the
-    // core expansion mechanic. The region head selects where: we verify the
-    // chosen region actually borders unowned land adjacent to us, else noop.
+    // core expansion mechanic. The attack execution auto-targets ALL unowned
+    // land adjacent to ALL of our border tiles, so the region head is
+    // irrelevant here — gating on it just makes ~99% of the policy's early
+    // wilderness attacks fizzle to noop (they pick a non-adjacent region),
+    // which starved the territory signal entirely (run7 diagnosis). We only
+    // require that we border SOME wilderness; otherwise the intent would
+    // instantly retreat (troops returned) and farm the attack-start bonus.
     if (action.target === 0) {
-      if (!this.regionHasAdjacentWilderness(game, me, action.region)) {
+      if (!this.bordersWilderness(game, me)) {
         return [];
       }
       return [
@@ -150,24 +155,20 @@ export class ActionTranslator {
   }
 
   /**
-   * True when the given coarse region contains unowned land that borders any
-   * of my tiles — i.e. a wilderness invasion there would actually expand us.
+   * True when any unowned passable land borders any of my tiles — i.e. a
+   * wilderness invasion would actually expand us somewhere. The attack
+   * execution auto-targets all adjacent wilderness regardless of any chosen
+   * region, so this check is deliberately global (not per-region).
    */
-  private regionHasAdjacentWilderness(
-    game: Game,
-    me: Player,
-    region: number,
-  ): boolean {
-    const [x0, y0, x1, y1] = this.regionBounds(game, region);
-    const myID = me.smallID();
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
-        const tile = game.ref(x, y);
-        if (!game.isLand(tile) || game.isImpassable(tile)) continue;
-        if (game.hasOwner(tile)) continue; // wilderness = unowned
-        // Adjacent to one of my border tiles?
-        for (const n of game.map().neighbors(tile)) {
-          if (game.map().ownerID(n) === myID) return true;
+  private bordersWilderness(game: Game, me: Player): boolean {
+    for (const t of me.borderTiles()) {
+      for (const n of game.map().neighbors(t)) {
+        if (
+          game.isLand(n) &&
+          !game.isImpassable(n) &&
+          !game.hasOwner(n)
+        ) {
+          return true;
         }
       }
     }

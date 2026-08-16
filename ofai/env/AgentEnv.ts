@@ -18,7 +18,6 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
-  UnitType,
 } from "../../src/core/game/Game";
 import { createGame } from "../../src/core/game/GameImpl";
 import { createNationsForGame } from "../../src/core/game/NationCreation";
@@ -41,12 +40,8 @@ import {
   NUM_PLAYER_SLOTS,
   NUM_UNIT_TYPES,
   REWARD_ATTACK_START,
-  REWARD_BOAT_START,
-  REWARD_BUILD_START,
   REWARD_DEATH,
   REWARD_INCOME,
-  REWARD_INCOMING,
-  REWARD_INCOMING_CAP,
   REWARD_LOSS_ALIVE,
   REWARD_TIMEOUT_ALIVE,
   REWARD_WIN,
@@ -85,9 +80,6 @@ export class AgentEnv {
   private spawnedOnce = false;
   private wasSpawned = false;
   private prevAttackIds = new Set<string>();
-  private prevIncomingIds = new Set<string>();
-  private prevBoats = 0;
-  private prevBuilt = 0;
   private prevTroopRate = 0;
   private spawnTilesFrac = 0;
   private peakTilesFrac = 0;
@@ -208,9 +200,6 @@ export class AgentEnv {
     this.spawnedOnce = false;
     this.wasSpawned = false;
     this.prevAttackIds = new Set();
-    this.prevIncomingIds = new Set();
-    this.prevBoats = 0;
-    this.prevBuilt = 0;
     this.prevTroopRate = 0;
     this.spawnTilesFrac = 0;
     this.peakTilesFrac = 0;
@@ -336,13 +325,7 @@ export class AgentEnv {
     return ids;
   }
 
-  private builtCount(me: Player): number {
-    let n = 0;
-    for (const t of UNIT_HEAD_ORDER) n += me.unitsConstructed(t);
-    return n;
-  }
-
-  /** Tiny bonuses for newly started effects; incoming-attack penalty; income. */
+  /** Small expansion-aligned bonuses: initiating an attack, and economy growth. */
   private activityRewards(): number {
     const me = this.me;
     let reward = 0;
@@ -355,23 +338,6 @@ export class AgentEnv {
       }
     }
     this.prevAttackIds = attackIds;
-
-    const boats = me.unitCount(UnitType.TransportShip);
-    if (boats > this.prevBoats) reward += REWARD_BOAT_START;
-    this.prevBoats = boats;
-
-    const built = this.builtCount(me);
-    if (built > this.prevBuilt) reward += REWARD_BUILD_START;
-    this.prevBuilt = built;
-
-    const incomingIds = this.attackIds(me.incomingAttacks());
-    let incomingPenalty = 0;
-    for (const id of incomingIds) {
-      if (!this.prevIncomingIds.has(id)) incomingPenalty += REWARD_INCOMING;
-    }
-    this.prevIncomingIds = incomingIds;
-    if (incomingPenalty < REWARD_INCOMING_CAP) incomingPenalty = REWARD_INCOMING_CAP;
-    reward += incomingPenalty;
 
     if (this.spawnedOnce && this.prevTroopRate > 0) {
       const rate = this.game.config().troopIncreaseRate(me);

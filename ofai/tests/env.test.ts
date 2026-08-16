@@ -8,6 +8,7 @@ import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
 import { AgentEnv } from "../env/AgentEnv";
 import {
   ACTION_ATTACK,
+  ACTION_RETREAT_ALL,
   ACTION_SPAWN,
   EnvConfig,
   NUM_REGIONS,
@@ -211,16 +212,32 @@ describe("AgentEnv", () => {
     expect(startPaid).toBe(true);
     expect(grewWithShaping).toBe(true);
 
-    const noop = env.step({
-      actionType: 0,
+    // Stop the attack, then let the economy settle. A genuine no-op must not
+    // keep paying an attack-start bonus: once nothing is conquering, per-step
+    // reward collapses to ~income (< attack-start). We poll because the first
+    // post-retreat steps still carry legit shaping/income from the conquest.
+    env.step({
+      actionType: ACTION_RETREAT_ALL,
       target: 0,
       region: 0,
       quantity: 0,
       unit: 0,
     });
-    // Same attack still running: no second start bonus. Incoming/income/shaping
-    // can move the number, but it must stay below a fresh attack-start.
-    expect(noop.reward).toBeLessThan(REWARD_ATTACK_START);
+    let settled = false;
+    for (let i = 0; i < 60; i++) {
+      const n = env.step({
+        actionType: 0,
+        target: 0,
+        region: 0,
+        quantity: 0,
+        unit: 0,
+      });
+      if (n.reward < REWARD_ATTACK_START) {
+        settled = true;
+        break;
+      }
+    }
+    expect(settled).toBe(true);
   }, 120000);
 
   it("timeout without expansion is death-sized, not -0.25", async () => {

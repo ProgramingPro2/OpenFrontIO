@@ -36,13 +36,16 @@ export const REWARD_WIN = 1.0;
 export const REWARD_DEATH = -1.0;
 export const REWARD_LOSS_ALIVE = -0.5; // someone else won while agent alive
 export const REWARD_TIMEOUT_ALIVE = -0.25; // hit maxTicks without a winner
-// Paid once when a real effect starts (not when the policy merely clicks).
+// Paid once when a real attack starts (not when the policy merely clicks).
+// Attacks deplete troops, so this is self-limiting and cannot be farmed.
 export const REWARD_ATTACK_START = 0.015;
-export const REWARD_BOAT_START = 0.015;
-export const REWARD_BUILD_START = 0.01;
-export const REWARD_INCOMING = -0.015;
-export const REWARD_INCOMING_CAP = -0.04; // per-step floor on incoming penalties
 export const REWARD_INCOME = 0.03; // clipped relative troop-regen growth
+// NOTE (run6 diagnosis): the boat/build "activity start" bonuses and the
+// incoming-attack penalty were removed. The policy farmed the boat/build
+// bonuses (30% boat / 18% build / 22% ally) instead of expanding, and the
+// incoming penalty punished expansion (more borders -> more attacks -> more
+// penalty), teaching the policy to stay small. Territory shaping + survival
+// are now the only dense signals, so expansion is the best strategy.
 // Timeout-alive is death-sized unless peak tiles exceeded spawn by this much.
 export const EXPAND_EPS = 0.002;
 
