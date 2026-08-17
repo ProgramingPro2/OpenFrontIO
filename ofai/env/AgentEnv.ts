@@ -18,6 +18,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../src/core/game/Game";
 import { createGame } from "../../src/core/game/GameImpl";
 import { createNationsForGame } from "../../src/core/game/NationCreation";
@@ -34,17 +35,31 @@ import { ActionTranslator, ActionVec, UNIT_HEAD_ORDER } from "./ActionTranslator
 import { makeObsBuffers, ObsBuffers, ObsExtractor } from "./ObsExtractor";
 import { TerrainCache } from "./TerrainCache";
 import {
+  ACTION_ALLY,
+  ACTION_ATTACK,
+  ACTION_BOAT,
+  ACTION_BREAK_ALLY,
+  ACTION_BUILD,
+  ACTION_EMBARGO,
+  ACTION_NAMES,
+  ACTION_NOOP,
+  ACTION_RETREAT_ALL,
+  ACTION_SPAWN,
+  ELIMINATION_SHAPING_WEIGHT,
   EnvConfig,
-  EXPAND_EPS,
   NUM_ACTION_TYPES,
   NUM_PLAYER_SLOTS,
+  NUM_QUANTITIES,
   NUM_UNIT_TYPES,
-  REWARD_ATTACK_START,
   REWARD_DEATH,
-  REWARD_INCOME,
   REWARD_LOSS_ALIVE,
-  REWARD_TIMEOUT_ALIVE,
+  REWARD_NO_SPAWN,
+  REWARD_SPAWN,
+  REWARD_TIMEOUT,
   REWARD_WIN,
+  RewardTerms,
+  TerminalCause,
+  TROOP_FRACTIONS,
 } from "./spec";
 
 export interface StepResult {
@@ -54,11 +69,17 @@ export interface StepResult {
   info: {
     tick: number;
     win: boolean;
+    stageSuccess: boolean;
     dead: boolean;
     kills: number;
     tilesFrac: number;
     spawned: boolean;
     hash: number | null;
+    terminalCause: TerminalCause;
+    peakTilesFrac: number;
+    rewardTerms: RewardTerms;
+    intentCount: number;
+    actionAccepted: boolean;
   };
 }
 
@@ -76,13 +97,11 @@ export class AgentEnv {
   private lastHash: number | null = null;
   private fatalError: string | null = null;
   private prevTilesFrac = 0;
-  private prevKills = 0;
+  private prevElimProgress = 0;
   private spawnedOnce = false;
   private wasSpawned = false;
-  private prevAttackIds = new Set<string>();
-  private prevTroopRate = 0;
-  private spawnTilesFrac = 0;
   private peakTilesFrac = 0;
+  private initialOpponentCount = 1;
   private slots: (Player | null)[] = [];
   resetCount = 0;
 
@@ -196,16 +215,17 @@ export class AgentEnv {
     this.lastHash = null;
     this.fatalError = null;
     this.prevTilesFrac = 0;
-    this.prevKills = 0;
+    this.prevElimProgress = 0;
     this.spawnedOnce = false;
     this.wasSpawned = false;
-    this.prevAttackIds = new Set();
-    this.prevTroopRate = 0;
-    this.spawnTilesFrac = 0;
     this.peakTilesFrac = 0;
     this.extractor.buildStatic(this.game, this.me);
     // Let tribes/nations place their spawns before the agent's first decision.
     this.runTicks(5);
+    this.initialOpponentCount = Math.max(
+      1,
+      this.game.players().filter((p) => p.id() !== this.me.id()).length,
+    );
     return this.extractObs();
   }
 
@@ -218,63 +238,108 @@ export class AgentEnv {
   }
 
   private extractObs(): ObsBuffers {
-    this.slots = this.extractor.extract(this.game, this.me, this.obs);
+    this.slots = this.extractor.extract(
+      this.game,
+      this.me,
+      this.obs,
+      this.cfg.maxTicks,
+    );
     this.fillMasks(this.slots);
     return this.obs;
+  }
+
+  private targetRow(actionType: number): number {
+    return actionType * NUM_PLAYER_SLOTS;
+  }
+
+  private fillQuantityMask(me: Player): boolean {
+    const qm = this.obs.quantityMask;
+    qm.fill(0);
+    let any = false;
+    const troops = me.troops();
+    for (let q = 0; q < NUM_QUANTITIES; q++) {
+      const frac = TROOP_FRACTIONS[q];
+      if (Math.floor(troops * frac) >= 1) {
+        qm[q] = 1;
+        any = true;
+      }
+    }
+    return any;
   }
 
   private fillMasks(slots: (Player | null)[]): void {
     const am = this.obs.actionMask;
     am.fill(0);
+    const tm = this.obs.targetMasks;
+    tm.fill(0);
+    this.obs.unitMask.fill(0);
+    this.obs.quantityMask.fill(0);
+
     const game = this.game;
     const me = this.me;
     const spawned = me.hasSpawned();
     const inSpawn = game.inSpawnPhase();
 
-    am[0] = 1; // noop always legal
+    // Spawn phase waits for the Human agent, so allowing NOOP here lets a
+    // greedy policy skip the game forever and never hit no_spawn.
     if (inSpawn && !spawned) {
-      am[1] = 1; // spawn is the only meaningful action
-      this.obs.targetMask.fill(0);
-      this.obs.unitMask.fill(0);
+      am[ACTION_SPAWN] = 1;
+      this.applyAllowedActionsGate(inSpawn, spawned);
       return;
     }
-    if (!spawned) return; // dead or waiting; only noop
+    am[ACTION_NOOP] = 1;
+    if (!spawned) {
+      this.applyAllowedActionsGate(inSpawn, spawned);
+      return; // dead or waiting; only noop
+    }
 
-    const tm = this.obs.targetMask;
-    tm.fill(0);
+    const anyQuantity = this.fillQuantityMask(me);
 
-    // Wilderness (TerraNullius) is attackable via target slot 0 whenever any
-    // of my border tiles touches unowned land. This is the core expansion
-    // path; without it the policy can never grow territory.
+    // ATTACK row: wilderness at slot 0; players we can attack elsewhere.
+    // Region is ignored for ATTACK (global wilderness / player targeting).
+    const attackRow = this.targetRow(ACTION_ATTACK);
     const bordersWilderness = this.hasAdjacentWilderness(me);
-    if (bordersWilderness) tm[0] = 1; // slot 0 == wilderness target for ATTACK
+    if (bordersWilderness) tm[attackRow + 0] = 1;
 
-    let anyAttackTarget = false;
+    const allyRow = this.targetRow(ACTION_ALLY);
+    const breakRow = this.targetRow(ACTION_BREAK_ALLY);
+    const embargoRow = this.targetRow(ACTION_EMBARGO);
+
+    let anyAttackTarget = bordersWilderness;
     let anyAllyTarget = false;
+    let anyBreakTarget = false;
     let anyEmbargoTarget = false;
+
     for (let i = 1; i < NUM_PLAYER_SLOTS; i++) {
       const p = slots[i];
       if (p === null || !p.isAlive()) continue;
+
+      // canAttackPlayer is only immunity/friendly — attacks with no shared
+      // border translate then immediately retreat. Require a land border.
+      if (me.canAttackPlayer(p) && me.sharesBorderWith(p)) {
+        tm[attackRow + i] = 1;
+        anyAttackTarget = true;
+      }
+
       const incomingFromThem = me
         .incomingAllianceRequests()
         .some((r) => r.requestor().id() === p.id());
-      const usable =
-        me.canAttackPlayer(p) ||
-        me.canSendAllianceRequest(p) ||
-        incomingFromThem ||
-        me.isAlliedWith(p) ||
-        !me.hasEmbargoAgainst(p);
-      if (!usable) continue;
-      tm[i] = 1;
-      if (me.canAttackPlayer(p)) anyAttackTarget = true;
       if (me.canSendAllianceRequest(p) || incomingFromThem) {
+        tm[allyRow + i] = 1;
         anyAllyTarget = true;
       }
-      if (!me.isAlliedWith(p)) anyEmbargoTarget = true;
+
+      if (me.isAlliedWith(p)) {
+        tm[breakRow + i] = 1;
+        anyBreakTarget = true;
+      } else {
+        // Embargo toggle is meaningful against non-allied opponents.
+        tm[embargoRow + i] = 1;
+        anyEmbargoTarget = true;
+      }
     }
 
     const um = this.obs.unitMask;
-    um.fill(0);
     let anyUnit = false;
     const gold = me.gold();
     for (let u = 0; u < NUM_UNIT_TYPES; u++) {
@@ -287,14 +352,43 @@ export class AgentEnv {
       }
     }
 
-    am[2] = anyAttackTarget || bordersWilderness ? 1 : 0;
-    am[3] = me.outgoingAttacks().length > 0 ? 1 : 0;
-    am[4] = anyUnit && me.numTilesOwned() > 0 ? 1 : 0;
-    am[5] = this.obs.boatRegions.some((v) => v === 1) && me.troops() > 100 ? 1 : 0;
-    am[6] = anyAllyTarget ? 1 : 0;
-    am[7] = me.allies().length > 0 ? 1 : 0;
-    am[8] = anyEmbargoTarget ? 1 : 0;
-    void NUM_ACTION_TYPES;
+    am[ACTION_ATTACK] = anyAttackTarget && anyQuantity ? 1 : 0;
+    am[ACTION_RETREAT_ALL] = me.outgoingAttacks().length > 0 ? 1 : 0;
+    am[ACTION_BUILD] = anyUnit && me.numTilesOwned() > 0 ? 1 : 0;
+    // Transport ships launch from shoreline (canBuildTransportShip); a Port
+    // is not required. Gating on Port made boat never-legal before build.
+    am[ACTION_BOAT] =
+      this.obs.boatRegions.some((v) => v === 1) && anyQuantity ? 1 : 0;
+    am[ACTION_ALLY] = anyAllyTarget ? 1 : 0;
+    am[ACTION_BREAK_ALLY] = anyBreakTarget ? 1 : 0;
+    am[ACTION_EMBARGO] = anyEmbargoTarget ? 1 : 0;
+
+    this.applyAllowedActionsGate(inSpawn, spawned);
+  }
+
+  /**
+   * Honor cfg.allowedActions. SPAWN is always preserved during the spawn
+   * window before the agent has land. NOOP is preserved only after that
+   * (it is illegal until the agent places).
+   */
+  private applyAllowedActionsGate(inSpawn: boolean, spawned: boolean): void {
+    const allowed = this.cfg.allowedActions;
+    if (allowed === undefined) return;
+    const allow = new Set<number>();
+    for (const a of allowed as Array<number | string>) {
+      if (typeof a === "number" && Number.isInteger(a)) {
+        allow.add(a);
+      } else if (typeof a === "string") {
+        const idx = (ACTION_NAMES as readonly string[]).indexOf(a);
+        if (idx >= 0) allow.add(idx);
+      }
+    }
+    if (!(inSpawn && !spawned)) allow.add(ACTION_NOOP);
+    if (inSpawn && !spawned) allow.add(ACTION_SPAWN);
+    const am = this.obs.actionMask;
+    for (let a = 0; a < NUM_ACTION_TYPES; a++) {
+      if (!allow.has(a)) am[a] = 0;
+    }
   }
 
   /**
@@ -307,11 +401,7 @@ export class AgentEnv {
     for (const tile of me.borderTiles()) {
       if (map.ownerID(tile) !== myID) continue;
       for (const n of map.neighbors(tile)) {
-        if (
-          map.isLand(n) &&
-          !map.isImpassable(n) &&
-          !map.hasOwner(n)
-        ) {
+        if (map.isLand(n) && !map.isImpassable(n) && !map.hasOwner(n)) {
           return true;
         }
       }
@@ -319,36 +409,13 @@ export class AgentEnv {
     return false;
   }
 
-  private attackIds(list: { id(): string }[]): Set<string> {
-    const ids = new Set<string>();
-    for (const a of list) ids.add(a.id());
-    return ids;
-  }
-
-  /** Small expansion-aligned bonuses: initiating an attack, and economy growth. */
-  private activityRewards(): number {
-    const me = this.me;
-    let reward = 0;
-
-    const attackIds = this.attackIds(me.outgoingAttacks());
-    for (const id of attackIds) {
-      if (!this.prevAttackIds.has(id)) {
-        reward += REWARD_ATTACK_START;
-        break;
-      }
-    }
-    this.prevAttackIds = attackIds;
-
-    if (this.spawnedOnce && this.prevTroopRate > 0) {
-      const rate = this.game.config().troopIncreaseRate(me);
-      const denom = Math.max(this.prevTroopRate, 1);
-      const delta = (rate - this.prevTroopRate) / denom;
-      const clipped = Math.max(-1, Math.min(1, delta));
-      reward += REWARD_INCOME * clipped;
-      this.prevTroopRate = rate;
-    }
-
-    return reward;
+  private elimProgress(): number {
+    const aliveOpponents = this.game
+      .players()
+      .filter((p) => p.id() !== this.me.id() && p.isAlive()).length;
+    const raw =
+      (this.initialOpponentCount - aliveOpponents) / this.initialOpponentCount;
+    return Math.max(0, Math.min(1, raw));
   }
 
   step(action: ActionVec): StepResult {
@@ -361,6 +428,11 @@ export class AgentEnv {
       ...i,
       clientID: this.agentClientID,
     }));
+    const intentCount = stamped.length;
+    // NOOP is a successful empty action; other types fizzle when they
+    // produce no core intents (illegal target / no troops / etc.).
+    const actionAccepted =
+      action.actionType === ACTION_NOOP || intentCount > 0;
 
     // Feed intents on the first turn of the decision window, then run the
     // window out with empty turns.
@@ -379,83 +451,121 @@ export class AgentEnv {
     const tilesFrac = this.me.numTilesOwned() / landTiles;
     this.peakTilesFrac = Math.max(this.peakTilesFrac, tilesFrac);
 
-    let reward = 0;
+    const terms: RewardTerms = {
+      terminal: 0,
+      spawn: 0,
+      territory: 0,
+      elimination: 0,
+      total: 0,
+    };
     let done = false;
     let win = false;
+    let stageSuccess = false;
     let dead = false;
+    let terminalCause: TerminalCause = "none";
 
-    // Spawn window ended without the agent ever taking land: the episode is
-    // unrecoverable (isAlive() == tiles.size > 0) and would otherwise drift
-    // for thousands of ticks as a ghost. Terminate immediately with a death
-    // penalty so the policy gets a clean "spawn on land first" gradient
-    // instead of a long tail of meaningless -1 returns.
-    if (!this.spawnedOnce && !game.inSpawnPhase()) {
+    // Mutually exclusive terminals — exactly one cause and one terminal reward.
+    // Spawn phase can linger until the Human places, so also treat maxTicks
+    // without a spawn as no_spawn (not timeout/death).
+    if (
+      !this.spawnedOnce &&
+      (!game.inSpawnPhase() || game.ticks() >= this.cfg.maxTicks)
+    ) {
       done = true;
-      dead = true;
-      reward += REWARD_DEATH;
-    }
-
-    const winner = game.getWinner();
-    if (winner !== null) {
-      done = true;
-      win = typeof winner !== "string" && winner.id() === this.me.id();
-      if (win) reward += REWARD_WIN;
-      else if (this.me.isAlive()) reward += REWARD_LOSS_ALIVE;
-      else dead = true;
-    }
-    if (!done && wasAlive && !this.me.isAlive()) {
-      done = true;
-      dead = true;
-      reward += REWARD_DEATH;
-    }
-    if (!done && game.ticks() >= this.cfg.maxTicks) {
-      done = true;
-      if (this.me.isAlive()) {
-        // Sitting still until the clock runs out is otherwise better than
-        // fighting and dying (-0.25 vs -1). Treat a no-expand timeout as death.
-        const grew = this.peakTilesFrac > this.spawnTilesFrac + EXPAND_EPS;
-        reward += grew ? REWARD_TIMEOUT_ALIVE : REWARD_DEATH;
-      } else {
+      terminalCause = "no_spawn";
+      terms.terminal = REWARD_NO_SPAWN;
+    } else {
+      const winner = game.getWinner();
+      const alive = this.me.isAlive();
+      const winFrac = this.cfg.winTilesFrac;
+      // Competency flag only — do not terminate. Ending the episode at a
+      // tile fraction taught policies to stop short of the 80% FFA win.
+      if (
+        this.spawnedOnce &&
+        winFrac !== undefined &&
+        winFrac > 0 &&
+        this.peakTilesFrac >= winFrac
+      ) {
+        stageSuccess = true;
+      }
+      if (winner !== null) {
+        const agentWon =
+          typeof winner !== "string" && winner.id() === this.me.id();
+        if (agentWon) {
+          done = true;
+          win = true;
+          stageSuccess = true;
+          terminalCause = "win";
+          terms.terminal = REWARD_WIN;
+        } else if (!alive) {
+          done = true;
+          dead = true;
+          terminalCause = "death";
+          terms.terminal = REWARD_DEATH;
+        } else {
+          done = true;
+          terminalCause = "loss_alive";
+          terms.terminal = REWARD_LOSS_ALIVE;
+        }
+      } else if (wasAlive && !alive) {
+        done = true;
         dead = true;
-        reward += REWARD_DEATH;
+        terminalCause = "death";
+        terms.terminal = REWARD_DEATH;
+      } else if (game.ticks() >= this.cfg.maxTicks) {
+        done = true;
+        if (!alive) {
+          dead = true;
+          terminalCause = "death";
+          terms.terminal = REWARD_DEATH;
+        } else {
+          terminalCause = "timeout";
+          terms.terminal = REWARD_TIMEOUT;
+        }
       }
     }
-    // Reward the spawn step explicitly: random policy flips a coin on
-    // spawn/noop during the spawn window, and without a positive signal the
-    // shaping gradient is flat (tilesFrac stays 0). +0.1 the first time we
-    // actually own land.
+
+    // One-time spawn bonus: without it the territory signal is flat at 0
+    // until the first conquest.
     if (!this.wasSpawned && this.spawnedOnce) {
-      reward += 0.1;
-      this.spawnTilesFrac = tilesFrac;
-      this.prevTroopRate = game.config().troopIncreaseRate(this.me);
+      terms.spawn = REWARD_SPAWN;
     }
     this.wasSpawned = this.spawnedOnce;
 
-    // Per-kill bonus, normalized by starting opponent count.
-    if (this.kills > this.prevKills) {
-      const opponents = Math.max(1, game.allPlayers().length - 1);
-      reward += (this.kills - this.prevKills) / opponents;
-      this.prevKills = this.kills;
-    }
+    // Bounded state-potential shaping: territory + weighted elimination.
+    // Kills remain a metric only (no direct REWARD_KILL).
+    const elim = this.elimProgress();
     if (this.cfg.shaping > 0) {
-      reward += this.cfg.shaping * (tilesFrac - this.prevTilesFrac);
+      const territoryDelta = tilesFrac - this.prevTilesFrac;
+      const elimDelta = elim - this.prevElimProgress;
+      terms.territory = this.cfg.shaping * territoryDelta;
+      terms.elimination =
+        this.cfg.shaping * ELIMINATION_SHAPING_WEIGHT * elimDelta;
     }
     this.prevTilesFrac = tilesFrac;
+    this.prevElimProgress = elim;
 
-    reward += this.activityRewards();
+    terms.total =
+      terms.terminal + terms.spawn + terms.territory + terms.elimination;
 
     return {
       obs: this.extractObs(),
-      reward,
+      reward: terms.total,
       done,
       info: {
         tick: game.ticks(),
         win,
+        stageSuccess,
         dead,
         kills: this.kills,
         tilesFrac,
         spawned: this.spawnedOnce,
         hash: this.lastHash,
+        terminalCause,
+        peakTilesFrac: this.peakTilesFrac,
+        rewardTerms: { ...terms },
+        intentCount,
+        actionAccepted,
       },
     };
   }

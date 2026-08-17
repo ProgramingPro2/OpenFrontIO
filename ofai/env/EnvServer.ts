@@ -24,11 +24,13 @@ import {
   GLOBAL_FEATURES,
   NUM_ACTION_TYPES,
   NUM_PLAYER_SLOTS,
+  NUM_QUANTITIES,
   NUM_REGIONS,
   NUM_UNIT_TYPES,
   PLAYER_FEATURES,
   SPATIAL_CHANNELS,
   SPATIAL_SIZE,
+  TARGET_MASKS_SIZE,
 } from "./spec";
 
 const PROJECT_ROOT = path.resolve(
@@ -41,7 +43,8 @@ interface BatchObs {
   players: Float32Array;
   global: Float32Array;
   actionMask: Uint8Array;
-  targetMask: Uint8Array;
+  targetMasks: Uint8Array;
+  quantityMask: Uint8Array;
   unitMask: Uint8Array;
   spawnRegions: Uint8Array;
   buildRegions: Uint8Array;
@@ -56,7 +59,8 @@ function stackObs(obsList: ObsBuffers[]): BatchObs {
     players: new Float32Array(k * NUM_PLAYER_SLOTS * PLAYER_FEATURES),
     global: new Float32Array(k * GLOBAL_FEATURES),
     actionMask: new Uint8Array(k * NUM_ACTION_TYPES),
-    targetMask: new Uint8Array(k * NUM_PLAYER_SLOTS),
+    targetMasks: new Uint8Array(k * TARGET_MASKS_SIZE),
+    quantityMask: new Uint8Array(k * NUM_QUANTITIES),
     unitMask: new Uint8Array(k * NUM_UNIT_TYPES),
     spawnRegions: new Uint8Array(k * NUM_REGIONS),
     buildRegions: new Uint8Array(k * NUM_REGIONS),
@@ -68,7 +72,8 @@ function stackObs(obsList: ObsBuffers[]): BatchObs {
     batch.players.set(o.players, i * NUM_PLAYER_SLOTS * PLAYER_FEATURES);
     batch.global.set(o.global, i * GLOBAL_FEATURES);
     batch.actionMask.set(o.actionMask, i * NUM_ACTION_TYPES);
-    batch.targetMask.set(o.targetMask, i * NUM_PLAYER_SLOTS);
+    batch.targetMasks.set(o.targetMasks, i * TARGET_MASKS_SIZE);
+    batch.quantityMask.set(o.quantityMask, i * NUM_QUANTITIES);
     batch.unitMask.set(o.unitMask, i * NUM_UNIT_TYPES);
     batch.spawnRegions.set(o.spawnRegions, i * NUM_REGIONS);
     batch.buildRegions.set(o.buildRegions, i * NUM_REGIONS);
@@ -77,13 +82,15 @@ function stackObs(obsList: ObsBuffers[]): BatchObs {
   return batch;
 }
 
-function obsTensors(batch: BatchObs, k: number) {
+function obsTensors(batch: BatchObs) {
   return {
     spatial: { dtype: "f32" as const, data: batch.spatial },
     players: { dtype: "f32" as const, data: batch.players },
     global: { dtype: "f32" as const, data: batch.global },
     action_mask: { dtype: "u8" as const, data: batch.actionMask },
-    target_mask: { dtype: "u8" as const, data: batch.targetMask },
+    // Flattened [K, NUM_ACTION_TYPES, NUM_PLAYER_SLOTS] row-major.
+    target_masks: { dtype: "u8" as const, data: batch.targetMasks },
+    quantity_mask: { dtype: "u8" as const, data: batch.quantityMask },
     unit_mask: { dtype: "u8" as const, data: batch.unitMask },
     spawn_regions: { dtype: "u8" as const, data: batch.spawnRegions },
     build_regions: { dtype: "u8" as const, data: batch.buildRegions },
@@ -136,7 +143,7 @@ class Server {
     );
     return encodeFrame(
       { type: "inited", k: this.envs.length },
-      obsTensors(stackObs(obs), this.envs.length),
+      obsTensors(stackObs(obs)),
     );
   }
 
@@ -174,7 +181,7 @@ class Server {
     }
     return encodeFrame(
       { type: "step", rewards: Array.from(rewards), dones: Array.from(dones), infos },
-      obsTensors(stackObs(obsList), k),
+      obsTensors(stackObs(obsList)),
     );
   }
 
@@ -184,7 +191,7 @@ class Server {
     const obs = await this.envs[index].reset(seed);
     return encodeFrame(
       { type: "reset", index },
-      obsTensors(stackObs([obs]), 1),
+      obsTensors(stackObs([obs])),
     );
   }
 

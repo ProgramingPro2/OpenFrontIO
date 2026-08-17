@@ -17,13 +17,17 @@ import {
 } from "../../src/core/game/Game";
 import { GameMap, TileRef } from "../../src/core/game/GameMap";
 import {
+  NUM_ACTION_TYPES,
   NUM_PLAYER_SLOTS,
+  NUM_QUANTITIES,
   NUM_REGIONS,
+  NUM_UNIT_TYPES,
   PLAYER_FEATURES,
   GLOBAL_FEATURES,
   REGION_GRID,
   SPATIAL_CHANNELS,
   SPATIAL_SIZE,
+  TARGET_MASKS_SIZE,
 } from "./spec";
 
 // Spatial channel indices.
@@ -68,7 +72,9 @@ export interface ObsBuffers {
   players: Float32Array; // [NUM_PLAYER_SLOTS, PLAYER_FEATURES]
   global: Float32Array; // [GLOBAL_FEATURES]
   actionMask: Uint8Array; // [NUM_ACTION_TYPES]
-  targetMask: Uint8Array; // [NUM_PLAYER_SLOTS]
+  /** Row-major [NUM_ACTION_TYPES, NUM_PLAYER_SLOTS]; per-action legal targets. */
+  targetMasks: Uint8Array;
+  quantityMask: Uint8Array; // [NUM_QUANTITIES]
   unitMask: Uint8Array; // [NUM_UNIT_TYPES]
   spawnRegions: Uint8Array; // [NUM_REGIONS]
   buildRegions: Uint8Array; // [NUM_REGIONS]
@@ -80,9 +86,10 @@ export function makeObsBuffers(): ObsBuffers {
     spatial: new Float32Array(SPATIAL_CHANNELS * PLANE),
     players: new Float32Array(NUM_PLAYER_SLOTS * PLAYER_FEATURES),
     global: new Float32Array(GLOBAL_FEATURES),
-    actionMask: new Uint8Array(9),
-    targetMask: new Uint8Array(NUM_PLAYER_SLOTS),
-    unitMask: new Uint8Array(10),
+    actionMask: new Uint8Array(NUM_ACTION_TYPES),
+    targetMasks: new Uint8Array(TARGET_MASKS_SIZE),
+    quantityMask: new Uint8Array(NUM_QUANTITIES),
+    unitMask: new Uint8Array(NUM_UNIT_TYPES),
     spawnRegions: new Uint8Array(NUM_REGIONS),
     buildRegions: new Uint8Array(NUM_REGIONS),
     boatRegions: new Uint8Array(NUM_REGIONS),
@@ -298,10 +305,37 @@ export class ObsExtractor {
   }
 
   /**
+   * Priority for filling limited opponent slots: actionable / bordering /
+   * incoming / allied opponents before pure territory ranking.
+   */
+  private slotPriority(me: Player, p: Player): number {
+    let score = p.numTilesOwned();
+    if (me.sharesBorderWith(p) || me.canAttackPlayer(p)) score += 1_000_000;
+    let incomingTroops = 0;
+    for (const atk of p.outgoingAttacks()) {
+      const t = atk.target();
+      if (t.isPlayer() && t.id() === me.id()) incomingTroops += atk.troops();
+    }
+    if (incomingTroops > 0) score += 500_000;
+    if (me.isAlliedWith(p)) score += 250_000;
+    const incomingAlly = me
+      .incomingAllianceRequests()
+      .some((r) => r.requestor().id() === p.id());
+    if (incomingAlly || me.canSendAllianceRequest(p)) score += 100_000;
+    return score;
+  }
+
+  /**
    * Write the full observation for `me` into `out`.
    * Returns the ordered list of players placed into slots (slot 0 = me).
+   * @param maxTicks episode tick cap used to normalize global[0] into [0,1]
    */
-  extract(game: Game, me: Player, out: ObsBuffers): (Player | null)[] {
+  extract(
+    game: Game,
+    me: Player,
+    out: ObsBuffers,
+    maxTicks: number,
+  ): (Player | null)[] {
     // Alliance changes reclassify tiles between ally/enemy planes; rebuild.
     const alliesNow = new Set(me.allies().map((a) => a.smallID()));
     if (
@@ -351,18 +385,19 @@ export class ObsExtractor {
       }
     }
 
-    // Region masks from counters.
+    // Region masks from counters. Semantically active for spawn/build/boat
+    // only; ATTACK ignores region (global wilderness / player targeting).
     for (let r = 0; r < NUM_REGIONS; r++) {
       out.spawnRegions[r] = this.regionUnownedLand[r] > 0 ? 1 : 0;
       out.buildRegions[r] = this.regionMyTiles[r] > 0 ? 1 : 0;
       out.boatRegions[r] = this.regionEnemyShore[r] > 0 ? 1 : 0;
     }
 
-    // Player slots: 0 = me, then others sorted by tiles owned.
+    // Player slots: 0 = me, then others by action priority then territory.
     const others = game
       .players()
       .filter((p) => p.id() !== me.id())
-      .sort((a, b) => b.numTilesOwned() - a.numTilesOwned())
+      .sort((a, b) => this.slotPriority(me, b) - this.slotPriority(me, a))
       .slice(0, NUM_PLAYER_SLOTS - 1);
     const slots: (Player | null)[] = [me, ...others];
     while (slots.length < NUM_PLAYER_SLOTS) slots.push(null);
@@ -397,16 +432,18 @@ export class ObsExtractor {
     }
 
     const g = out.global;
-    const cfg = game.config();
     let myIncoming = 0;
     for (const atk of me.incomingAttacks()) myIncoming += atk.troops();
-    g[0] = game.ticks() / Math.max(1, cfg.gameConfig().maxTimerValue ?? 0) || 0;
+    const allPlayers = game.players();
+    const aliveCount = allPlayers.filter((p) => p.isAlive()).length;
+    const tickProgress = game.ticks() / Math.max(1, maxTicks);
+    g[0] = Math.max(0, Math.min(1, tickProgress));
     g[1] = game.inSpawnPhase() ? 1 : 0;
     g[2] = me.numTilesOwned() / landTiles;
     g[3] = Math.log1p(me.troops()) / 15;
     g[4] = Math.log1p(Number(me.gold())) / 20;
     g[5] = Math.log1p(myIncoming) / 15;
-    g[6] = game.players().filter((p) => p.isAlive()).length / NUM_PLAYER_SLOTS;
+    g[6] = aliveCount / Math.max(1, allPlayers.length);
     g[7] = Math.log1p(landTiles) / 15;
     g[8] = me.units(UnitType.Port).length > 0 ? 1 : 0;
     g[9] = game.getWinner() !== null ? 1 : 0;

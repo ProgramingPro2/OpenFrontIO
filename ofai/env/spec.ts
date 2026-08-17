@@ -28,26 +28,58 @@ export const ACTION_ALLY = 6; // request, or accept a pending incoming request
 export const ACTION_BREAK_ALLY = 7;
 export const ACTION_EMBARGO = 8; // toggle embargo on target
 
+export const ACTION_NAMES = [
+  "noop",
+  "spawn",
+  "attack",
+  "retreat_all",
+  "build",
+  "boat",
+  "ally",
+  "break_ally",
+  "embargo",
+] as const;
+
 // Troop fractions for attack/boat, indexed by the quantity head.
 export const TROOP_FRACTIONS = [0.05, 0.15, 0.3, 0.5, 0.8];
 
-// Reward coefficients.
-export const REWARD_WIN = 1.0;
+// Flat target-mask layout: [NUM_ACTION_TYPES, NUM_PLAYER_SLOTS] row-major.
+export const TARGET_MASKS_SIZE = NUM_ACTION_TYPES * NUM_PLAYER_SLOTS;
+
+// Terminal outcomes. Exactly one non-`none` cause is set when done=true.
+// `win` is a core FFA win only (80% land / last standing). A curriculum
+// tile milestone is `curriculum_success`, never `win`.
+export type TerminalCause =
+  | "none"
+  | "win"
+  | "curriculum_success"
+  | "death"
+  | "loss_alive"
+  | "timeout"
+  | "no_spawn";
+
+// Reward coefficients. Core win dominates every other terminal, including
+// the early-stage curriculum milestone. Non-objective terminals are -1 so
+// a losing trajectory cannot outscore a win even with dense shaping
+// (curriculum keeps shaping <= 1, and shaping is bounded state-potential).
+export const REWARD_WIN = 3.0;
+export const REWARD_CURRICULUM_SUCCESS = 1.0;
 export const REWARD_DEATH = -1.0;
-export const REWARD_LOSS_ALIVE = -0.5; // someone else won while agent alive
-export const REWARD_TIMEOUT_ALIVE = -0.25; // hit maxTicks without a winner
-// Paid once when a real attack starts (not when the policy merely clicks).
-// Attacks deplete troops, so this is self-limiting and cannot be farmed.
-export const REWARD_ATTACK_START = 0.015;
-export const REWARD_INCOME = 0.03; // clipped relative troop-regen growth
-// NOTE (run6 diagnosis): the boat/build "activity start" bonuses and the
-// incoming-attack penalty were removed. The policy farmed the boat/build
-// bonuses (30% boat / 18% build / 22% ally) instead of expanding, and the
-// incoming penalty punished expansion (more borders -> more attacks -> more
-// penalty), teaching the policy to stay small. Territory shaping + survival
-// are now the only dense signals, so expansion is the best strategy.
-// Timeout-alive is death-sized unless peak tiles exceeded spawn by this much.
-export const EXPAND_EPS = 0.002;
+export const REWARD_LOSS_ALIVE = -1.0;
+export const REWARD_TIMEOUT = -1.0;
+export const REWARD_NO_SPAWN = -1.0;
+export const REWARD_SPAWN = 0.1; // one-time when the agent first owns land
+// Elimination shaping weight relative to territory delta.
+export const ELIMINATION_SHAPING_WEIGHT = 0.25;
+
+/** Per-step reward decomposition reported in StepResult.info. */
+export interface RewardTerms {
+  terminal: number;
+  spawn: number;
+  territory: number;
+  elimination: number;
+  total: number;
+}
 
 export interface EnvConfig {
   map: string; // GameMapType enum key, e.g. "FourIslands"
@@ -58,7 +90,16 @@ export interface EnvConfig {
   seed: string; // deterministic seed (becomes the gameID)
   maxTicks: number; // episode cap in ticks (10 ticks = 1 game second)
   decisionInterval: number; // ticks between agent decisions
-  shaping: number; // coefficient for territory-delta reward shaping (0 = off)
+  shaping: number; // coefficient for bounded state-potential shaping (0 = off)
+  /** When set, only these action types (plus needed SPAWN; NOOP after spawn) are legal. */
+  allowedActions?: Array<number | string>;
+  /**
+   * Optional early-stage competency flag. When the living agent's peak
+   * tile fraction reaches this value, `stageSuccess` is set true.
+   * This does **not** terminate the episode and is never a core `win`.
+   * Terminating on the milestone taught policies to stop expanding.
+   */
+  winTilesFrac?: number;
 }
 
 export const DEFAULT_ENV_CONFIG: EnvConfig = {

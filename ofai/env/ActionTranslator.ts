@@ -1,7 +1,10 @@
 /**
  * Translates a factorized policy action (5 ints) into concrete game intents.
- * Invalid or impossible actions degrade to a no-op (empty intent list), which
- * the mask head should make rare during training.
+ *
+ * Masked-legal actions should yield real intents whenever the core can accept
+ * them. When the chosen region cannot host a valid build/boat, a deterministic
+ * validated fallback scans other candidate tiles — never inventing invalid
+ * core intents. Truly impossible actions still degrade to an empty list.
  */
 import {
   Game,
@@ -9,6 +12,7 @@ import {
   UnitType,
 } from "../../src/core/game/Game";
 import { TileRef } from "../../src/core/game/GameMap";
+import { canBuildTransportShip } from "../../src/core/game/TransportShipUtils";
 import { Intent } from "../../src/core/Schemas";
 import {
   ACTION_ALLY,
@@ -20,6 +24,7 @@ import {
   ACTION_NOOP,
   ACTION_RETREAT_ALL,
   ACTION_SPAWN,
+  NUM_REGIONS,
   REGION_GRID,
   TROOP_FRACTIONS,
 } from "./spec";
@@ -93,9 +98,19 @@ export class ActionTranslator {
 
   private spawn(game: Game, me: Player, region: number): Intent[] {
     if (me.hasSpawned() && !game.inSpawnPhase()) return [];
+    const tile = this.findSpawnTile(game, region);
+    if (tile !== null) return [{ type: "spawn", tile }];
+    // Deterministic fallback: first valid unowned land anywhere.
+    for (let r = 0; r < NUM_REGIONS; r++) {
+      if (r === region) continue;
+      const t = this.findSpawnTile(game, r);
+      if (t !== null) return [{ type: "spawn", tile: t }];
+    }
+    return [];
+  }
+
+  private findSpawnTile(game: Game, region: number): TileRef | null {
     const [x0, y0, x1, y1] = this.regionBounds(game, region);
-    // Prefer the region center, spiraling out is overkill: scan a bounded set
-    // of candidates and pick the first valid land tile with no owner.
     const cx = (x0 + x1) >> 1;
     const cy = (y0 + y1) >> 1;
     const candidates: TileRef[] = [game.ref(cx, cy)];
@@ -110,10 +125,10 @@ export class ActionTranslator {
         !game.hasOwner(tile) &&
         !game.isImpassable(tile)
       ) {
-        return [{ type: "spawn", tile }];
+        return tile;
       }
     }
-    return [];
+    return null;
   }
 
   private attack(
@@ -127,14 +142,10 @@ export class ActionTranslator {
     if (troops < 1) return [];
 
     // Slot 0 is the agent itself; reinterpreting target==0 as "wilderness"
-    // (TerraNullius) is what unlocks expansion into uninhabited land — the
-    // core expansion mechanic. The attack execution auto-targets ALL unowned
-    // land adjacent to ALL of our border tiles, so the region head is
-    // irrelevant here — gating on it just makes ~99% of the policy's early
-    // wilderness attacks fizzle to noop (they pick a non-adjacent region),
-    // which starved the territory signal entirely (run7 diagnosis). We only
-    // require that we border SOME wilderness; otherwise the intent would
-    // instantly retreat (troops returned) and farm the attack-start bonus.
+    // (TerraNullius) unlocks expansion into uninhabited land. Attack execution
+    // auto-targets ALL unowned land adjacent to ALL border tiles, so the
+    // region head is irrelevant for ATTACK — only require that we border
+    // some wilderness.
     if (action.target === 0) {
       if (!this.bordersWilderness(game, me)) {
         return [];
@@ -150,15 +161,14 @@ export class ActionTranslator {
 
     const target = slots[action.target];
     if (target === null || target.id() === me.id()) return [];
-    if (!me.canAttackPlayer(target)) return [];
+    if (!me.canAttackPlayer(target) || !me.sharesBorderWith(target)) return [];
     return [{ type: "attack", targetID: target.id(), troops }];
   }
 
   /**
    * True when any unowned passable land borders any of my tiles — i.e. a
-   * wilderness invasion would actually expand us somewhere. The attack
-   * execution auto-targets all adjacent wilderness regardless of any chosen
-   * region, so this check is deliberately global (not per-region).
+   * wilderness invasion would actually expand us somewhere. Global (not
+   * per-region): ATTACK ignores the region head.
    */
   private bordersWilderness(game: Game, me: Player): boolean {
     for (const t of me.borderTiles()) {
@@ -188,43 +198,93 @@ export class ActionTranslator {
   private build(game: Game, me: Player, action: ActionVec): Intent[] {
     const unitType = UNIT_HEAD_ORDER[action.unit] ?? UnitType.City;
     if (game.config().isUnitDisabled(unitType)) return [];
-    const [x0, y0, x1, y1] = this.regionBounds(game, action.region);
-    // Scan my tiles in the region (subsampled) until canBuild accepts one.
+    const inRegion = this.findBuildInRegion(game, me, unitType, action.region);
+    if (inRegion !== null) {
+      return [{ type: "build_unit", unit: unitType, tile: inRegion }];
+    }
+    // Deterministic fallback: first owned tile where canBuild succeeds.
+    const fallback = this.findBuildAnywhere(game, me, unitType);
+    if (fallback !== null) {
+      return [{ type: "build_unit", unit: unitType, tile: fallback }];
+    }
+    return [];
+  }
+
+  private findBuildInRegion(
+    game: Game,
+    me: Player,
+    unitType: UnitType,
+    region: number,
+  ): TileRef | null {
+    const [x0, y0, x1, y1] = this.regionBounds(game, region);
     let tries = 0;
-    for (let y = y0; y < y1 && tries < 48; y += 2) {
-      for (let x = x0; x < x1 && tries < 48; x += 2) {
+    for (let y = y0; y < y1 && tries < 64; y += 2) {
+      for (let x = x0; x < x1 && tries < 64; x += 2) {
         const tile = game.ref(x, y);
         if (!game.hasOwner(tile)) continue;
         const owner = game.owner(tile);
         if (!owner.isPlayer() || owner.id() !== me.id()) continue;
         tries++;
         const buildable = me.canBuild(unitType, tile);
-        if (buildable !== false) {
-          return [{ type: "build_unit", unit: unitType, tile: buildable }];
-        }
+        if (buildable !== false) return buildable;
       }
     }
-    return [];
+    return null;
+  }
+
+  private findBuildAnywhere(
+    game: Game,
+    me: Player,
+    unitType: UnitType,
+  ): TileRef | null {
+    let tries = 0;
+    for (const tile of me.tiles()) {
+      if (tries++ > 256) break;
+      const buildable = me.canBuild(unitType, tile);
+      if (buildable !== false) return buildable;
+    }
+    return null;
   }
 
   private boat(game: Game, me: Player, action: ActionVec): Intent[] {
     const frac = TROOP_FRACTIONS[action.quantity] ?? 0.15;
     const troops = Math.floor(me.troops() * frac);
     if (troops < 1) return [];
-    const [x0, y0, x1, y1] = this.regionBounds(game, action.region);
+
+    const inRegion = this.findBoatInRegion(game, me, action.region);
+    if (inRegion !== null) {
+      return [{ type: "boat", dst: inRegion, troops }];
+    }
+    // Deterministic fallback across regions that look boatable.
+    for (let r = 0; r < NUM_REGIONS; r++) {
+      if (r === action.region) continue;
+      const dst = this.findBoatInRegion(game, me, r);
+      if (dst !== null) return [{ type: "boat", dst, troops }];
+    }
+    return [];
+  }
+
+  private findBoatInRegion(
+    game: Game,
+    me: Player,
+    region: number,
+  ): TileRef | null {
+    const [x0, y0, x1, y1] = this.regionBounds(game, region);
     let tries = 0;
-    for (let y = y0; y < y1 && tries < 48; y += 2) {
-      for (let x = x0; x < x1 && tries < 48; x += 2) {
+    for (let y = y0; y < y1 && tries < 64; y += 2) {
+      for (let x = x0; x < x1 && tries < 64; x += 2) {
         const tile = game.ref(x, y);
-        if (!game.isLand(tile)) continue;
-        if (!game.isShoreline(tile)) continue;
+        if (!game.isLand(tile) || !game.isShoreline(tile)) continue;
         const owner = game.owner(tile);
         if (owner.isPlayer() && owner.id() === me.id()) continue;
         tries++;
-        return [{ type: "boat", dst: tile, troops }];
+        // Only emit intents the core would actually accept.
+        if (canBuildTransportShip(game, me, tile) !== false) {
+          return tile;
+        }
       }
     }
-    return [];
+    return null;
   }
 
   private ally(
@@ -260,6 +320,7 @@ export class ActionTranslator {
   ): Intent[] {
     const target = slots[action.target];
     if (target === null || target.id() === me.id()) return [];
+    if (me.isAlliedWith(target)) return [];
     const action_ = me.hasEmbargoAgainst(target) ? "stop" : "start";
     return [{ type: "embargo", targetID: target.id(), action: action_ }];
   }
