@@ -16,71 +16,16 @@ import { fileURLToPath } from "node:url";
 import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
 import { AgentEnv } from "./AgentEnv";
 import { ActionVec } from "./ActionTranslator";
+import { BatchObs, stackObs } from "./batchObs";
 import { encodeFrame, FrameDecoder, frameTensors } from "./framing";
 import { ObsBuffers } from "./ObsExtractor";
 import { TerrainCache } from "./TerrainCache";
-import {
-  EnvConfig,
-  GLOBAL_FEATURES,
-  NUM_ACTION_TYPES,
-  NUM_PLAYER_SLOTS,
-  NUM_QUANTITIES,
-  NUM_REGIONS,
-  NUM_UNIT_TYPES,
-  PLAYER_FEATURES,
-  SPATIAL_CHANNELS,
-  SPATIAL_SIZE,
-  TARGET_MASKS_SIZE,
-} from "./spec";
+import { EnvConfig } from "./spec";
 
 const PROJECT_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-
-interface BatchObs {
-  spatial: Float32Array;
-  players: Float32Array;
-  global: Float32Array;
-  actionMask: Uint8Array;
-  targetMasks: Uint8Array;
-  quantityMask: Uint8Array;
-  unitMask: Uint8Array;
-  spawnRegions: Uint8Array;
-  buildRegions: Uint8Array;
-  boatRegions: Uint8Array;
-}
-
-function stackObs(obsList: ObsBuffers[]): BatchObs {
-  const k = obsList.length;
-  const planeN = SPATIAL_CHANNELS * SPATIAL_SIZE * SPATIAL_SIZE;
-  const batch: BatchObs = {
-    spatial: new Float32Array(k * planeN),
-    players: new Float32Array(k * NUM_PLAYER_SLOTS * PLAYER_FEATURES),
-    global: new Float32Array(k * GLOBAL_FEATURES),
-    actionMask: new Uint8Array(k * NUM_ACTION_TYPES),
-    targetMasks: new Uint8Array(k * TARGET_MASKS_SIZE),
-    quantityMask: new Uint8Array(k * NUM_QUANTITIES),
-    unitMask: new Uint8Array(k * NUM_UNIT_TYPES),
-    spawnRegions: new Uint8Array(k * NUM_REGIONS),
-    buildRegions: new Uint8Array(k * NUM_REGIONS),
-    boatRegions: new Uint8Array(k * NUM_REGIONS),
-  };
-  for (let i = 0; i < k; i++) {
-    const o = obsList[i];
-    batch.spatial.set(o.spatial, i * planeN);
-    batch.players.set(o.players, i * NUM_PLAYER_SLOTS * PLAYER_FEATURES);
-    batch.global.set(o.global, i * GLOBAL_FEATURES);
-    batch.actionMask.set(o.actionMask, i * NUM_ACTION_TYPES);
-    batch.targetMasks.set(o.targetMasks, i * TARGET_MASKS_SIZE);
-    batch.quantityMask.set(o.quantityMask, i * NUM_QUANTITIES);
-    batch.unitMask.set(o.unitMask, i * NUM_UNIT_TYPES);
-    batch.spawnRegions.set(o.spawnRegions, i * NUM_REGIONS);
-    batch.buildRegions.set(o.buildRegions, i * NUM_REGIONS);
-    batch.boatRegions.set(o.boatRegions, i * NUM_REGIONS);
-  }
-  return batch;
-}
 
 function obsTensors(batch: BatchObs) {
   return {
@@ -100,9 +45,15 @@ function obsTensors(batch: BatchObs) {
 
 class Server {
   private envs: AgentEnv[] = [];
+  private batch: BatchObs | null = null;
   private terrain = new TerrainCache(
     new NodeGameMapLoader(path.join(PROJECT_ROOT, "resources/maps")),
   );
+
+  private stacked(obsList: ObsBuffers[]): BatchObs {
+    this.batch = stackObs(obsList, this.batch ?? undefined);
+    return this.batch;
+  }
 
   async handle(
     header: Record<string, unknown>,
@@ -143,7 +94,7 @@ class Server {
     );
     return encodeFrame(
       { type: "inited", k: this.envs.length },
-      obsTensors(stackObs(obs)),
+      obsTensors(this.stacked(obs)),
     );
   }
 
@@ -181,7 +132,7 @@ class Server {
     }
     return encodeFrame(
       { type: "step", rewards: Array.from(rewards), dones: Array.from(dones), infos },
-      obsTensors(stackObs(obsList)),
+      obsTensors(this.stacked(obsList)),
     );
   }
 
@@ -191,7 +142,7 @@ class Server {
     const obs = await this.envs[index].reset(seed);
     return encodeFrame(
       { type: "reset", index },
-      obsTensors(stackObs([obs])),
+      obsTensors(this.stacked([obs])),
     );
   }
 

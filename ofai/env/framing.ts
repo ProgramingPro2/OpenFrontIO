@@ -106,8 +106,19 @@ export class FrameDecoder {
 /** Convenience: decode a frame into named raw buffers keyed by tensor name. */
 export function frameTensors(frame: Frame): Record<string, { spec: TensorSpec; buf: Buffer }> {
   const tensors = (frame.header.tensors ?? {}) as Record<string, TensorSpec>;
-  const blobRegion = Buffer.concat(frame.blobs);
+  const ordered = Object.entries(tensors).sort(
+    (a, b) => a[1].offset - b[1].offset,
+  );
   const out: Record<string, { spec: TensorSpec; buf: Buffer }> = {};
+  // FrameDecoder already stores offset-ordered subarrays; skip a concat copy.
+  if (ordered.length === frame.blobs.length) {
+    for (let i = 0; i < ordered.length; i++) {
+      const [name, spec] = ordered[i];
+      out[name] = { spec, buf: frame.blobs[i] };
+    }
+    return out;
+  }
+  const blobRegion = Buffer.concat(frame.blobs);
   for (const [name, spec] of Object.entries(tensors)) {
     out[name] = {
       spec,

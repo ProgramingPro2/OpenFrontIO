@@ -51,18 +51,17 @@ const STRUCTURE_TYPES: readonly UnitType[] = [
   UnitType.Factory,
 ];
 
-const NUKE_TYPES: readonly UnitType[] = [
-  UnitType.AtomBomb,
-  UnitType.HydrogenBomb,
-  UnitType.MIRV,
-  UnitType.MIRVWarhead,
-];
-
 // Naval units share the structure planes: a warship or an inbound transport
 // is exactly the kind of "enemy unit presence" the policy must see coming.
 const NAVAL_TYPES: readonly UnitType[] = [
   UnitType.Warship,
   UnitType.TransportShip,
+];
+
+// Nukes are not painted onto spatial planes; do not scan them each extract.
+const RASTER_UNIT_TYPES: readonly UnitType[] = [
+  ...STRUCTURE_TYPES,
+  ...NAVAL_TYPES,
 ];
 
 const PLANE = SPATIAL_SIZE * SPATIAL_SIZE;
@@ -130,6 +129,10 @@ export class ObsExtractor {
   private allySmallIDs = new Set<number>();
   // Neighbor scratch for border maintenance (N, S, W, E offsets).
   private neighborScratch: TileRef[] = [0, 0, 0, 0];
+  // Per-tile "my tile borders unowned passable land" bits + count. Matches
+  // AgentEnv.hasAdjacentWildernessScan (borderTiles + neighbors4).
+  private wildAdj = new Uint8Array(0);
+  private wildAdjCount = 0;
 
   /** Full rebuild of every maintained structure. Call once per game. */
   buildStatic(game: Game, me: Player): void {
@@ -148,6 +151,9 @@ export class ObsExtractor {
 
     const n = this.mapW * this.mapH;
     if (this.mirror.length !== n) this.mirror = new Uint16Array(n);
+    if (this.wildAdj.length !== n) this.wildAdj = new Uint8Array(n);
+    else this.wildAdj.fill(0);
+    this.wildAdjCount = 0;
     const state = map.tileStateBuffer();
     this.mirror.set(state);
 
@@ -168,6 +174,38 @@ export class ObsExtractor {
         this.mountainBins[i] /= this.bins.counts[i];
       }
     }
+    for (let ref = 0; ref < n; ref++) {
+      this.refreshWilderness(map, ref);
+    }
+  }
+
+  /** True iff any owned tile borders unowned passable land (ATTACK wilderness). */
+  hasAdjacentWilderness(): boolean {
+    return this.wildAdjCount > 0;
+  }
+
+  private isWilderness(map: GameMap, ref: TileRef): boolean {
+    return map.isLand(ref) && !map.isImpassable(ref) && !map.hasOwner(ref);
+  }
+
+  private computeWildAdj(map: GameMap, ref: TileRef): boolean {
+    if (map.ownerID(ref) !== this.mySmallID) return false;
+    const nCount = map.neighbors4(ref, this.neighborScratch);
+    for (let j = 0; j < nCount; j++) {
+      if (this.isWilderness(map, this.neighborScratch[j])) return true;
+    }
+    return false;
+  }
+
+  private setWildAdj(ref: TileRef, now: boolean): void {
+    const was = this.wildAdj[ref] !== 0;
+    if (now === was) return;
+    this.wildAdj[ref] = now ? 1 : 0;
+    this.wildAdjCount += now ? 1 : -1;
+  }
+
+  private refreshWilderness(map: GameMap, ref: TileRef): void {
+    this.setWildAdj(ref, this.computeWildAdj(map, ref));
   }
 
   private accumulateInitial(
@@ -213,12 +251,18 @@ export class ObsExtractor {
       const s = packed[i + 1] & 0xffff;
       this.transition(game, ref, this.mirror[ref], s);
       this.mirror[ref] = s;
-      // Ownership changes can flip border status of cardinal neighbors.
+      // Ownership changes can flip border / wilderness status of neighbors.
       const nCount = map.neighbors4(ref, this.neighborScratch);
+      const neigh = this.neighborScratch;
+      const saved = [neigh[0], neigh[1], neigh[2], neigh[3]];
       for (let j = 0; j < nCount; j++) {
-        this.refreshBorder(map, this.neighborScratch[j]);
+        this.refreshBorder(map, saved[j]);
       }
       this.refreshBorder(map, ref);
+      this.refreshWilderness(map, ref);
+      for (let j = 0; j < nCount; j++) {
+        this.refreshWilderness(map, saved[j]);
+      }
     }
   }
 
@@ -367,22 +411,13 @@ export class ObsExtractor {
 
     // Rasterize units: structures and naval units into mine/enemy planes.
     const mySmallID = me.smallID();
-    for (const unit of game.units(
-      ...STRUCTURE_TYPES,
-      ...NUKE_TYPES,
-      ...NAVAL_TYPES,
-    )) {
+    for (const unit of game.units(...RASTER_UNIT_TYPES)) {
       if (!unit.isActive()) continue;
       const bin = this.binOf(unit.tile());
       const owner = unit.owner();
       const isMine = owner.isPlayer() && owner.smallID() === mySmallID;
-      if (
-        STRUCTURE_TYPES.includes(unit.type()) ||
-        NAVAL_TYPES.includes(unit.type())
-      ) {
-        const ch = isMine ? CH_MY_STRUCTURES : CH_ENEMY_STRUCTURES;
-        spatial[ch * PLANE + bin] = Math.min(1, spatial[ch * PLANE + bin] + 0.34);
-      }
+      const ch = isMine ? CH_MY_STRUCTURES : CH_ENEMY_STRUCTURES;
+      spatial[ch * PLANE + bin] = Math.min(1, spatial[ch * PLANE + bin] + 0.34);
     }
 
     // Region masks from counters. Semantically active for spawn/build/boat

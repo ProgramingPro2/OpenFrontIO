@@ -6,6 +6,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
 import { AgentEnv } from "../env/AgentEnv";
+import { allocBatchObs, stackObs } from "../env/batchObs";
+import { encodeFrame, FrameDecoder, frameTensors } from "../env/framing";
+import { makeObsBuffers } from "../env/ObsExtractor";
 import {
   ACTION_ALLY,
   ACTION_ATTACK,
@@ -663,4 +666,78 @@ describe("AgentEnv", () => {
     expect(done).toBe(true);
     expect(steps).toBeGreaterThan(5);
   }, 120000);
+
+  it("wilderness cache matches border-tile scan after spawn and steps", async () => {
+    const env = await AgentEnv.create(
+      testConfig({ seed: "wild-cache", maxTicks: 4000 }),
+      terrain,
+    );
+    expect(env.hasAdjacentWildernessCached()).toBe(
+      env.hasAdjacentWildernessScan(),
+    );
+    const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    for (let i = 0; i < 40 && !r.done; i++) {
+      expect(env.hasAdjacentWildernessCached()).toBe(
+        env.hasAdjacentWildernessScan(),
+      );
+      r = env.step({
+        actionType: ACTION_ATTACK,
+        target: 0,
+        region: 0,
+        quantity: 4,
+        unit: 0,
+      });
+    }
+    expect(env.hasAdjacentWildernessCached()).toBe(
+      env.hasAdjacentWildernessScan(),
+    );
+  }, 120000);
+});
+
+describe("stackObs", () => {
+  it("reuses a matching batch buffer without changing values", () => {
+    const a = makeObsBuffers();
+    const b = makeObsBuffers();
+    a.spatial[0] = 0.25;
+    a.global[1] = 0.5;
+    b.spatial[3] = 0.75;
+    b.actionMask[2] = 1;
+    const first = stackObs([a, b]);
+    const reuse = allocBatchObs(2);
+    const second = stackObs([a, b], reuse);
+    expect(second).toBe(reuse);
+    expect(Array.from(second.spatial)).toEqual(Array.from(first.spatial));
+    expect(Array.from(second.global)).toEqual(Array.from(first.global));
+    expect(Array.from(second.actionMask)).toEqual(Array.from(first.actionMask));
+    const otherK = stackObs([a], reuse);
+    expect(otherK).not.toBe(reuse);
+    expect(otherK.spatial.length).toBe(a.spatial.length);
+  });
+});
+
+describe("frameTensors", () => {
+  it("maps offset-ordered blobs without concatenating", () => {
+    const spatial = new Float32Array([1, 2, 3, 4]);
+    const mask = new Uint8Array([1, 0, 1]);
+    const wire = encodeFrame(
+      { type: "step" },
+      {
+        spatial: { dtype: "f32", data: spatial },
+        action_mask: { dtype: "u8", data: mask },
+      },
+    );
+    const dec = new FrameDecoder();
+    const frames = dec.push(wire);
+    expect(frames).toHaveLength(1);
+    const tensors = frameTensors(frames[0]);
+    expect(new Float32Array(tensors.spatial.buf.buffer, tensors.spatial.buf.byteOffset, 4)).toEqual(spatial);
+    expect(Array.from(tensors.action_mask.buf)).toEqual([1, 0, 1]);
+  });
 });

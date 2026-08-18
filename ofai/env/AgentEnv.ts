@@ -103,6 +103,7 @@ export class AgentEnv {
   private peakTilesFrac = 0;
   private initialOpponentCount = 1;
   private slots: (Player | null)[] = [];
+  private allowedSet: Set<number> | null = null;
   resetCount = 0;
 
   get seed(): string {
@@ -298,7 +299,7 @@ export class AgentEnv {
     // ATTACK row: wilderness at slot 0; players we can attack elsewhere.
     // Region is ignored for ATTACK (global wilderness / player targeting).
     const attackRow = this.targetRow(ACTION_ATTACK);
-    const bordersWilderness = this.hasAdjacentWilderness(me);
+    const bordersWilderness = this.extractor.hasAdjacentWilderness();
     if (bordersWilderness) tm[attackRow + 0] = 1;
 
     const allyRow = this.targetRow(ACTION_ALLY);
@@ -374,31 +375,41 @@ export class AgentEnv {
   private applyAllowedActionsGate(inSpawn: boolean, spawned: boolean): void {
     const allowed = this.cfg.allowedActions;
     if (allowed === undefined) return;
-    const allow = new Set<number>();
-    for (const a of allowed as Array<number | string>) {
-      if (typeof a === "number" && Number.isInteger(a)) {
-        allow.add(a);
-      } else if (typeof a === "string") {
-        const idx = (ACTION_NAMES as readonly string[]).indexOf(a);
-        if (idx >= 0) allow.add(idx);
+    if (this.allowedSet === null) {
+      const allow = new Set<number>();
+      for (const a of allowed as Array<number | string>) {
+        if (typeof a === "number" && Number.isInteger(a)) {
+          allow.add(a);
+        } else if (typeof a === "string") {
+          const idx = (ACTION_NAMES as readonly string[]).indexOf(a);
+          if (idx >= 0) allow.add(idx);
+        }
       }
+      this.allowedSet = allow;
     }
-    if (!(inSpawn && !spawned)) allow.add(ACTION_NOOP);
-    if (inSpawn && !spawned) allow.add(ACTION_SPAWN);
+    const allow = this.allowedSet;
+    const forceNoop = !(inSpawn && !spawned);
+    const forceSpawn = inSpawn && !spawned;
     const am = this.obs.actionMask;
     for (let a = 0; a < NUM_ACTION_TYPES; a++) {
-      if (!allow.has(a)) am[a] = 0;
+      const extra =
+        (a === ACTION_NOOP && forceNoop) || (a === ACTION_SPAWN && forceSpawn);
+      if (!allow.has(a) && !extra) am[a] = 0;
     }
   }
 
+  hasAdjacentWildernessCached(): boolean {
+    return this.extractor.hasAdjacentWilderness();
+  }
+
   /**
-   * True when any of my border tiles is adjacent to unowned, passable land —
-   * i.e. a wilderness invasion is possible. Drives the ATTACK legality mask.
+   * Scan-based wilderness check (reference for cache equality tests).
+   * Cardinal neighbors only, matching GameMap.neighbors / neighbors4.
    */
-  private hasAdjacentWilderness(me: Player): boolean {
+  hasAdjacentWildernessScan(): boolean {
     const map = this.game.map();
-    const myID = me.smallID();
-    for (const tile of me.borderTiles()) {
+    const myID = this.me.smallID();
+    for (const tile of this.me.borderTiles()) {
       if (map.ownerID(tile) !== myID) continue;
       for (const n of map.neighbors(tile)) {
         if (map.isLand(n) && !map.isImpassable(n) && !map.hasOwner(n)) {
