@@ -7,6 +7,11 @@
 export const SPATIAL_CHANNELS = 10;
 export const SPATIAL_SIZE = 64; // planes are SPATIAL_SIZE x SPATIAL_SIZE
 export const NUM_PLAYER_SLOTS = 16; // slot 0 is always the agent
+// When more than 15 opponents exist, slots 1-14 stay individually
+// targetable (border/attackers first). Slot 15 is an untargetable
+// overflow aggregate (both Nation+Bot flags). Residual: >14 simultaneous
+// border/attackers still cannot all be targeted; a v3 schema would be
+// needed for full observability.
 export const PLAYER_FEATURES = 14;
 export const GLOBAL_FEATURES = 10;
 

@@ -5,10 +5,16 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
+import { resolveAutoReset } from "../env/autoReset";
 import { AgentEnv } from "../env/AgentEnv";
 import { allocBatchObs, stackObs } from "../env/batchObs";
 import { encodeFrame, FrameDecoder, frameTensors } from "../env/framing";
-import { makeObsBuffers } from "../env/ObsExtractor";
+import {
+  assignOpponentSlots,
+  compareOpponentRank,
+  makeObsBuffers,
+  slotPriorityScore,
+} from "../env/ObsExtractor";
 import {
   ACTION_ALLY,
   ACTION_ATTACK,
@@ -22,6 +28,7 @@ import {
   NUM_PLAYER_SLOTS,
   NUM_QUANTITIES,
   NUM_REGIONS,
+  PLAYER_FEATURES,
   REWARD_CURRICULUM_SUCCESS,
   REWARD_DEATH,
   REWARD_NO_SPAWN,
@@ -699,6 +706,255 @@ describe("AgentEnv", () => {
       env.hasAdjacentWildernessScan(),
     );
   }, 120000);
+});
+
+describe("opponent slot ranking", () => {
+  it("breaks priority ties by smallID then id", () => {
+    const a = { priority: 10, smallID: 3, id: "c" };
+    const b = { priority: 10, smallID: 1, id: "z" };
+    const c = { priority: 11, smallID: 9, id: "a" };
+    const ranked = [a, b, c].sort(compareOpponentRank);
+    expect(ranked.map((x) => x.id)).toEqual(["a", "z", "c"]);
+  });
+
+  it("keeps border/attackers in individual slots when overflowing", () => {
+    const metas = [];
+    for (let i = 0; i < 10; i++) {
+      metas.push({
+        priority: slotPriorityScore({
+          tiles: 5000 + i,
+          sharesBorder: false,
+          canAttack: false,
+          incomingTroops: 0,
+          allied: false,
+          allySignal: false,
+        }),
+        smallID: 100 + i,
+        id: `mass-${i}`,
+      });
+    }
+    for (let i = 0; i < 8; i++) {
+      metas.push({
+        priority: slotPriorityScore({
+          tiles: 10 + i,
+          sharesBorder: true,
+          canAttack: true,
+          incomingTroops: i === 0 ? 50 : 0,
+          allied: false,
+          allySignal: false,
+        }),
+        smallID: i,
+        id: `border-${i}`,
+      });
+    }
+    const { picked, rest, overflow } = assignOpponentSlots(metas, 15);
+    expect(overflow).toBe(true);
+    expect(picked).toHaveLength(14);
+    expect(rest.length).toBeGreaterThan(0);
+    const pickedIds = new Set(picked.map((m) => m.id));
+    for (let i = 0; i < 8; i++) {
+      expect(pickedIds.has(`border-${i}`)).toBe(true);
+    }
+    expect(rest.every((m) => m.id.startsWith("mass-"))).toBe(true);
+  });
+});
+
+describe("overflow aggregate slot", () => {
+  it("does not aggregate when opponents fit in 15 slots", async () => {
+    const env = await AgentEnv.create(
+      testConfig({ map: "Halkidiki", mapSize: "Compact", bots: 1, nations: "disabled" }),
+      terrain,
+    );
+    const players = env.peekObs().players;
+    const last = (NUM_PLAYER_SLOTS - 1) * PLAYER_FEATURES;
+    const exists = players[last];
+    const nation = players[last + 6];
+    const bot = players[last + 7];
+    // One bot: last slot is empty or a real player, never the both-type sentinel.
+    expect(nation === 1 && bot === 1 && exists === 1).toBe(false);
+  }, 60000);
+
+  it("writes an untargetable overflow aggregate when bots exceed 15 slots", async () => {
+    const env = await AgentEnv.create(
+      testConfig({
+        map: "FourIslands",
+        mapSize: "Normal",
+        bots: 20,
+        nations: "disabled",
+      }),
+      terrain,
+    );
+    const obs = env.peekObs();
+    const last = (NUM_PLAYER_SLOTS - 1) * PLAYER_FEATURES;
+    expect(obs.players[last + 0]).toBe(1);
+    expect(obs.players[last + 1]).toBe(0);
+    expect(obs.players[last + 6]).toBe(1);
+    expect(obs.players[last + 7]).toBe(1);
+    const atk = attackTargetMask(obs);
+    expect(atk[NUM_PLAYER_SLOTS - 1]).toBe(0);
+    const allyRow = ACTION_ALLY * NUM_PLAYER_SLOTS;
+    expect(obs.targetMasks[allyRow + NUM_PLAYER_SLOTS - 1]).toBe(0);
+    expect(env.slotFlagsMatchLive()).toBe(true);
+    expect(env.peekSlots()[NUM_PLAYER_SLOTS - 1]).toBeNull();
+  }, 60000);
+
+  it("cached slot flags match a live border scan after spawn", async () => {
+    const env = await AgentEnv.create(
+      testConfig({
+        map: "FourIslands",
+        mapSize: "Normal",
+        bots: 20,
+        nations: "disabled",
+        seed: "slot-cache",
+      }),
+      terrain,
+    );
+    expect(env.slotFlagsMatchLive()).toBe(true);
+    const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    for (let i = 0; i < 12 && !r.done; i++) {
+      expect(env.slotFlagsMatchLive()).toBe(true);
+      r = env.step({
+        actionType: ACTION_ATTACK,
+        target: 0,
+        region: 0,
+        quantity: 4,
+        unit: 0,
+      });
+    }
+    expect(env.slotFlagsMatchLive()).toBe(true);
+    const atk = attackTargetMask(r.obs);
+    expect(atk[NUM_PLAYER_SLOTS - 1]).toBe(0);
+  }, 120000);
+});
+
+describe("ActionTranslator wilderness cache", () => {
+  it("cache and scan produce the same wilderness attack intents", async () => {
+    const env = await AgentEnv.create(
+      testConfig({ seed: "wild-action", maxTicks: 4000 }),
+      terrain,
+    );
+    const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+    let r = env.step({
+      actionType: ACTION_SPAWN,
+      target: 0,
+      region: spawnRegion,
+      quantity: 2,
+      unit: 0,
+    });
+    const attack = {
+      actionType: ACTION_ATTACK,
+      target: 0,
+      region: 0,
+      quantity: 4,
+      unit: 0,
+    };
+    for (let i = 0; i < 20 && !r.done; i++) {
+      const cached = env.hasAdjacentWildernessCached();
+      const scanned = env.hasAdjacentWildernessScan();
+      expect(cached).toBe(scanned);
+      expect(env.translateForTest(attack, cached)).toEqual(
+        env.translateForTest(attack, scanned),
+      );
+      r = env.step(attack);
+    }
+    expect(env.hasAdjacentWildernessCached()).toBe(
+      env.hasAdjacentWildernessScan(),
+    );
+  }, 120000);
+});
+
+describe("headless GameRunner name placement", () => {
+  it("skipNamePlacement does not change hash, tiles, or packed obs", async () => {
+    const cfg = testConfig({
+      seed: "headless-hash",
+      map: "Halkidiki",
+      mapSize: "Compact",
+      bots: 1,
+      nations: "disabled",
+      maxTicks: 800,
+    });
+    const run = async (skip: boolean) => {
+      const env = await AgentEnv.create(cfg, terrain, {
+        skipNamePlacement: skip,
+      });
+      const spawnRegion = firstSetRegion(env.peekObs().spawnRegions);
+      let r = env.step({
+        actionType: ACTION_SPAWN,
+        target: 0,
+        region: spawnRegion,
+        quantity: 2,
+        unit: 0,
+      });
+      let lastHash: number | null = r.info.hash;
+      for (let i = 0; i < 16 && !r.done; i++) {
+        r = env.step({
+          actionType: ACTION_NOOP,
+          target: 0,
+          region: 0,
+          quantity: 0,
+          unit: 0,
+        });
+        if (r.info.hash !== null) lastHash = r.info.hash;
+      }
+      const frame = env.renderFrame();
+      return {
+        hash: lastHash,
+        tiles: r.info.tilesFrac,
+        tick: r.info.tick,
+        spatial: Array.from(r.obs.spatial),
+        players: Array.from(r.obs.players),
+        masks: Array.from(r.obs.actionMask),
+        cells: Array.from(frame.cells),
+      };
+    };
+    const headless = await run(true);
+    const named = await run(false);
+    expect(headless.hash).not.toBeNull();
+    expect(headless.hash).toBe(named.hash);
+    expect(headless.tiles).toBe(named.tiles);
+    expect(headless.tick).toBe(named.tick);
+    expect(headless.spatial).toEqual(named.spatial);
+    expect(headless.players).toEqual(named.players);
+    expect(headless.masks).toEqual(named.masks);
+    expect(headless.cells).toEqual(named.cells);
+  }, 180000);
+});
+
+describe("reset next config", () => {
+  it("applies a provided seed instead of appending -rN", async () => {
+    const env = await AgentEnv.create(testConfig({ seed: "base-seed" }), terrain);
+    expect(env.seed).toBe("base-seed");
+    await env.reset("holdout-frozen-0");
+    expect(env.seed).toBe("holdout-frozen-0");
+    await env.reset({ seed: "mixed-next", map: "Halkidiki", mapSize: "Compact" });
+    expect(env.seed).toBe("mixed-next");
+  }, 60000);
+});
+
+describe("resolveAutoReset", () => {
+  it("uses Python nextConfigs and falls back to seed-rN", () => {
+    const provided = resolveAutoReset(
+      [{ seed: "mixed-next", map: "Hawaii" }, "holdout-1"],
+      0,
+      "base",
+      3,
+    );
+    expect(provided.fallback).toBe(false);
+    expect(provided.spec).toEqual({ seed: "mixed-next", map: "Hawaii" });
+    const asString = resolveAutoReset(["holdout-1"], 0, "base", 3);
+    expect(asString).toEqual({ spec: "holdout-1", fallback: false });
+    const missing = resolveAutoReset(undefined, 0, "base", 3);
+    expect(missing).toEqual({ spec: "base-r3", fallback: true });
+    const hole = resolveAutoReset([null, undefined], 0, "watch-seed", 1);
+    expect(hole).toEqual({ spec: "watch-seed-r1", fallback: true });
+  });
 });
 
 describe("stackObs", () => {

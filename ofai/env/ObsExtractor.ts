@@ -66,6 +66,72 @@ const RASTER_UNIT_TYPES: readonly UnitType[] = [
 
 const PLANE = SPATIAL_SIZE * SPATIAL_SIZE;
 
+/** Sort key for opponent slot fill. Higher priority first, then smallID/id. */
+export interface OpponentRankKey {
+  priority: number;
+  smallID: number;
+  id: string;
+}
+
+/**
+ * Priority matches the historical slotPriority formula: tiles, then
+ * border-or-attackable, incoming attacks, allied, alliance-signal.
+ */
+export function slotPriorityScore(args: {
+  tiles: number;
+  sharesBorder: boolean;
+  canAttack: boolean;
+  incomingTroops: number;
+  allied: boolean;
+  allySignal: boolean;
+}): number {
+  let score = args.tiles;
+  if (args.sharesBorder || args.canAttack) score += 1_000_000;
+  if (args.incomingTroops > 0) score += 500_000;
+  if (args.allied) score += 250_000;
+  if (args.allySignal) score += 100_000;
+  return score;
+}
+
+/** Deterministic descending rank: priority, then smallID, then id. */
+export function compareOpponentRank(
+  a: OpponentRankKey,
+  b: OpponentRankKey,
+): number {
+  if (b.priority !== a.priority) return b.priority - a.priority;
+  if (a.smallID !== b.smallID) return a.smallID - b.smallID;
+  if (a.id < b.id) return -1;
+  if (a.id > b.id) return 1;
+  return 0;
+}
+
+/**
+ * Fill limited opponent slots. When opponents overflow the individual
+ * budget, keep `individualSlots - 1` targetable rows and leave the rest
+ * for an untargetable aggregate.
+ */
+export function assignOpponentSlots<T extends OpponentRankKey>(
+  metas: readonly T[],
+  individualSlots: number,
+): { picked: T[]; rest: T[]; overflow: boolean } {
+  const sorted = metas.slice().sort(compareOpponentRank);
+  const overflow = sorted.length > individualSlots;
+  const n = overflow ? individualSlots - 1 : individualSlots;
+  return {
+    picked: sorted.slice(0, n),
+    rest: overflow ? sorted.slice(n) : [],
+    overflow,
+  };
+}
+
+interface OpponentMeta extends OpponentRankKey {
+  player: Player;
+  sharesBorder: boolean;
+  canAttack: boolean;
+  incomingTroops: number;
+  allied: boolean;
+}
+
 export interface ObsBuffers {
   spatial: Float32Array; // [SPATIAL_CHANNELS, SPATIAL_SIZE, SPATIAL_SIZE]
   players: Float32Array; // [NUM_PLAYER_SLOTS, PLAYER_FEATURES]
@@ -133,6 +199,11 @@ export class ObsExtractor {
   // AgentEnv.hasAdjacentWildernessScan (borderTiles + neighbors4).
   private wildAdj = new Uint8Array(0);
   private wildAdjCount = 0;
+  // Per-slot flags computed once in extract() and reused for player
+  // features + AgentEnv target masks. Slot 0 (self) and the overflow
+  // aggregate stay false / untargetable.
+  private slotSharesBorder = new Uint8Array(NUM_PLAYER_SLOTS);
+  private slotCanAttack = new Uint8Array(NUM_PLAYER_SLOTS);
 
   /** Full rebuild of every maintained structure. Call once per game. */
   buildStatic(game: Game, me: Player): void {
@@ -348,25 +419,53 @@ export class ObsExtractor {
     return ry * REGION_GRID + rx;
   }
 
-  /**
-   * Priority for filling limited opponent slots: actionable / bordering /
-   * incoming / allied opponents before pure territory ranking.
-   */
-  private slotPriority(me: Player, p: Player): number {
-    let score = p.numTilesOwned();
-    if (me.sharesBorderWith(p) || me.canAttackPlayer(p)) score += 1_000_000;
+  slotSharesBorderWith(slot: number): boolean {
+    return this.slotSharesBorder[slot] !== 0;
+  }
+
+  slotCanAttackPlayer(slot: number): boolean {
+    return this.slotCanAttack[slot] !== 0;
+  }
+
+  private incomingTroopsFrom(me: Player, p: Player): number {
     let incomingTroops = 0;
     for (const atk of p.outgoingAttacks()) {
       const t = atk.target();
       if (t.isPlayer() && t.id() === me.id()) incomingTroops += atk.troops();
     }
-    if (incomingTroops > 0) score += 500_000;
-    if (me.isAlliedWith(p)) score += 250_000;
+    return incomingTroops;
+  }
+
+  /**
+   * One opponent scan: border, attackability, incoming troops, and rank.
+   * Callers must not re-invoke sharesBorderWith for the same extract.
+   */
+  private opponentMeta(me: Player, p: Player): OpponentMeta {
+    const sharesBorder = me.sharesBorderWith(p);
+    const canAttack = me.canAttackPlayer(p);
+    const incomingTroops = this.incomingTroopsFrom(me, p);
+    const allied = me.isAlliedWith(p);
     const incomingAlly = me
       .incomingAllianceRequests()
       .some((r) => r.requestor().id() === p.id());
-    if (incomingAlly || me.canSendAllianceRequest(p)) score += 100_000;
-    return score;
+    const allySignal = incomingAlly || me.canSendAllianceRequest(p);
+    return {
+      player: p,
+      priority: slotPriorityScore({
+        tiles: p.numTilesOwned(),
+        sharesBorder,
+        canAttack,
+        incomingTroops,
+        allied,
+        allySignal,
+      }),
+      smallID: p.smallID(),
+      id: p.id(),
+      sharesBorder,
+      canAttack,
+      incomingTroops,
+      allied,
+    };
   }
 
   /**
@@ -429,41 +528,33 @@ export class ObsExtractor {
     }
 
     // Player slots: 0 = me, then others by action priority then territory.
-    const others = game
-      .players()
-      .filter((p) => p.id() !== me.id())
-      .sort((a, b) => this.slotPriority(me, b) - this.slotPriority(me, a))
-      .slice(0, NUM_PLAYER_SLOTS - 1);
-    const slots: (Player | null)[] = [me, ...others];
+    // When opponents exceed 15, keep 14 individually targetable slots and
+    // write an untargetable aggregate into the last slot (null player).
+    // Border / attackability is computed once per opponent and reused.
+    this.slotSharesBorder.fill(0);
+    this.slotCanAttack.fill(0);
+    const metas: OpponentMeta[] = [];
+    for (const p of game.players()) {
+      if (p.id() === me.id()) continue;
+      metas.push(this.opponentMeta(me, p));
+    }
+    const assigned = assignOpponentSlots(metas, NUM_PLAYER_SLOTS - 1);
+    const slots: (Player | null)[] = [me, ...assigned.picked.map((m) => m.player)];
     while (slots.length < NUM_PLAYER_SLOTS) slots.push(null);
 
     const landTiles = Math.max(1, game.numLandTiles());
     const players = out.players;
     players.fill(0);
-    for (let i = 0; i < NUM_PLAYER_SLOTS; i++) {
-      const p = slots[i];
-      if (p === null) continue;
-      const base = i * PLAYER_FEATURES;
-      const rel = i === 0 ? Relation.Friendly : me.relation(p);
-      let incomingTroops = 0;
-      for (const atk of p.outgoingAttacks()) {
-        const t = atk.target();
-        if (t.isPlayer() && t.id() === me.id()) incomingTroops += atk.troops();
-      }
-      players[base + 0] = 1; // exists
-      players[base + 1] = i === 0 ? 1 : 0; // is_self
-      players[base + 2] = p.numTilesOwned() / landTiles;
-      players[base + 3] = Math.log1p(p.troops()) / 15;
-      players[base + 4] = Math.log1p(Number(p.gold())) / 20;
-      players[base + 5] = p.isAlive() ? 1 : 0;
-      players[base + 6] = p.type() === PlayerType.Nation ? 1 : 0;
-      players[base + 7] = p.type() === PlayerType.Bot ? 1 : 0;
-      players[base + 8] = i > 0 && me.isAlliedWith(p) ? 1 : 0;
-      players[base + 9] = i > 0 && me.hasEmbargoAgainst(p) ? 1 : 0;
-      players[base + 10] = Math.log1p(incomingTroops) / 15;
-      players[base + 11] = i > 0 && me.sharesBorderWith(p) ? 1 : 0;
-      players[base + 12] = rel / 3;
-      players[base + 13] = p.hasSpawned() ? 1 : 0;
+    this.writeSelfFeatures(players, me, landTiles);
+    for (let i = 0; i < assigned.picked.length; i++) {
+      const meta = assigned.picked[i];
+      const slot = i + 1;
+      this.slotSharesBorder[slot] = meta.sharesBorder ? 1 : 0;
+      this.slotCanAttack[slot] = meta.canAttack ? 1 : 0;
+      this.writePlayerFeatures(players, slot, me, meta, landTiles);
+    }
+    if (assigned.rest.length > 0) {
+      this.writeAggregate(players, NUM_PLAYER_SLOTS - 1, me, assigned.rest, landTiles);
     }
 
     const g = out.global;
@@ -484,5 +575,107 @@ export class ObsExtractor {
     g[9] = game.getWinner() !== null ? 1 : 0;
 
     return slots;
+  }
+
+  private writeSelfFeatures(
+    players: Float32Array,
+    me: Player,
+    landTiles: number,
+  ): void {
+    const incomingTroops = this.incomingTroopsFrom(me, me);
+    const base = 0;
+    players[base + 0] = 1;
+    players[base + 1] = 1;
+    players[base + 2] = me.numTilesOwned() / landTiles;
+    players[base + 3] = Math.log1p(me.troops()) / 15;
+    players[base + 4] = Math.log1p(Number(me.gold())) / 20;
+    players[base + 5] = me.isAlive() ? 1 : 0;
+    players[base + 6] = me.type() === PlayerType.Nation ? 1 : 0;
+    players[base + 7] = me.type() === PlayerType.Bot ? 1 : 0;
+    players[base + 8] = 0;
+    players[base + 9] = 0;
+    players[base + 10] = Math.log1p(incomingTroops) / 15;
+    players[base + 11] = 0;
+    players[base + 12] = Relation.Friendly / 3;
+    players[base + 13] = me.hasSpawned() ? 1 : 0;
+  }
+
+  private writePlayerFeatures(
+    players: Float32Array,
+    slot: number,
+    me: Player,
+    meta: OpponentMeta,
+    landTiles: number,
+  ): void {
+    const p = meta.player;
+    const base = slot * PLAYER_FEATURES;
+    players[base + 0] = 1;
+    players[base + 1] = 0;
+    players[base + 2] = p.numTilesOwned() / landTiles;
+    players[base + 3] = Math.log1p(p.troops()) / 15;
+    players[base + 4] = Math.log1p(Number(p.gold())) / 20;
+    players[base + 5] = p.isAlive() ? 1 : 0;
+    players[base + 6] = p.type() === PlayerType.Nation ? 1 : 0;
+    players[base + 7] = p.type() === PlayerType.Bot ? 1 : 0;
+    players[base + 8] = meta.allied ? 1 : 0;
+    players[base + 9] = me.hasEmbargoAgainst(p) ? 1 : 0;
+    players[base + 10] = Math.log1p(meta.incomingTroops) / 15;
+    players[base + 11] = meta.sharesBorder ? 1 : 0;
+    players[base + 12] = me.relation(p) / 3;
+    players[base + 13] = p.hasSpawned() ? 1 : 0;
+  }
+
+  /**
+   * Summary of opponents that did not fit in individual slots.
+   * Both type flags are set (impossible for a real player) so the policy
+   * can recognize leftover mass. The slot stays null / untargetable.
+   */
+  private writeAggregate(
+    players: Float32Array,
+    slot: number,
+    me: Player,
+    rest: OpponentMeta[],
+    landTiles: number,
+  ): void {
+    let tiles = 0;
+    let troops = 0;
+    let gold = 0;
+    let incoming = 0;
+    let alive = 0;
+    let spawned = 0;
+    let nationTiles = 0;
+    let botTiles = 0;
+    let border = 0;
+    let relationSum = 0;
+    for (const meta of rest) {
+      const p = meta.player;
+      const owned = p.numTilesOwned();
+      tiles += owned;
+      troops += p.troops();
+      gold += Number(p.gold());
+      if (p.isAlive()) alive += 1;
+      if (p.hasSpawned()) spawned += 1;
+      if (p.type() === PlayerType.Nation) nationTiles += owned;
+      if (p.type() === PlayerType.Bot) botTiles += owned;
+      if (meta.sharesBorder) border += 1;
+      relationSum += me.relation(p);
+      incoming += meta.incomingTroops;
+    }
+    const base = slot * PLAYER_FEATURES;
+    players[base + 0] = 1;
+    players[base + 1] = 0;
+    players[base + 2] = tiles / landTiles;
+    players[base + 3] = Math.log1p(troops) / 15;
+    players[base + 4] = Math.log1p(gold) / 20;
+    players[base + 5] = alive > 0 ? 1 : 0;
+    // Sentinel: a real player is never both Nation and Bot.
+    players[base + 6] = 1;
+    players[base + 7] = 1;
+    players[base + 8] = 0;
+    players[base + 9] = 0;
+    players[base + 10] = Math.log1p(incoming) / 15;
+    players[base + 11] = border > 0 ? 1 : 0;
+    players[base + 12] = rest.length > 0 ? relationSum / rest.length / 3 : 0;
+    players[base + 13] = spawned > 0 ? 1 : 0;
   }
 }

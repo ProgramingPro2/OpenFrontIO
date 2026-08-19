@@ -4,8 +4,8 @@
  *
  * Protocol (see framing.ts for the wire format):
  *   <- {cmd:"init", envs:[EnvConfig,...]}        -> {type:"inited"} + obs tensors
- *   <- {cmd:"step", actions:[[a,t,r,q,u],...]}   -> {type:"step", rewards, dones, infos} + obs tensors
- *   <- {cmd:"reset", index, seed?}               -> {type:"reset"} + obs tensors (K=1)
+ *   <- {cmd:"step", actions, nextConfigs?}       -> {type:"step", rewards, dones, infos} + obs tensors
+ *   <- {cmd:"reset", index, seed?|config?}       -> {type:"reset"} + obs tensors (K=1)
  *   <- {cmd:"close"}                             -> server exits
  *
  * Run: npx tsx ofai/env/EnvServer.ts --port 8765
@@ -20,6 +20,7 @@ import { BatchObs, stackObs } from "./batchObs";
 import { encodeFrame, FrameDecoder, frameTensors } from "./framing";
 import { ObsBuffers } from "./ObsExtractor";
 import { TerrainCache } from "./TerrainCache";
+import { resolveAutoReset } from "./autoReset";
 import { EnvConfig } from "./spec";
 
 const PROJECT_ROOT = path.resolve(
@@ -122,10 +123,7 @@ class Server {
       dones[i] = result.done ? 1 : 0;
       infos.push(result.info);
       if (result.done) {
-        // Auto-reset: next episode starts with a fresh seed derived from the
-        // old one so streams never repeat within a run.
-        const newSeed = `${env.seed}-r${env.resetCount++}`;
-        obsList.push(await env.reset(newSeed));
+        obsList.push(await this.resetDone(env, i, header));
       } else {
         obsList.push(result.obs);
       }
@@ -136,10 +134,36 @@ class Server {
     );
   }
 
+  /**
+   * Python owns the train seed stream and may send the next EnvConfig
+   * (seed + map) for a finished env. Watch / ad-hoc clients that omit
+   * nextConfigs keep the historical `{seed}-r{n}` fallback.
+   */
+  private async resetDone(
+    env: AgentEnv,
+    index: number,
+    header: Record<string, unknown>,
+  ): Promise<ObsBuffers> {
+    const nextConfigs = header.nextConfigs as
+      | Array<Partial<EnvConfig> | string | null | undefined>
+      | undefined;
+    const { spec, fallback } = resolveAutoReset(
+      nextConfigs,
+      index,
+      env.seed,
+      env.resetCount,
+    );
+    if (fallback) {
+      env.resetCount += 1;
+    }
+    return env.reset(spec);
+  }
+
   private async reset(header: Record<string, unknown>): Promise<Buffer> {
     const index = header.index as number;
+    const patch = header.config as Partial<EnvConfig> | undefined;
     const seed = header.seed as string | undefined;
-    const obs = await this.envs[index].reset(seed);
+    const obs = await this.envs[index].reset(patch ?? seed);
     return encodeFrame(
       { type: "reset", index },
       obsTensors(this.stacked([obs])),

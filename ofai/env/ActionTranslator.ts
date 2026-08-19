@@ -54,18 +54,21 @@ export interface ActionVec {
 export class ActionTranslator {
   /**
    * @param slots player slots from the observation the action was based on
+   * @param bordersWilderness when provided, reuse ObsExtractor's maintained
+   *   wilderness-adjacency cache. Omit only for standalone/scan fallback.
    */
   translate(
     game: Game,
     me: Player,
     action: ActionVec,
     slots: (Player | null)[],
+    bordersWilderness?: boolean,
   ): Intent[] {
     switch (action.actionType) {
       case ACTION_SPAWN:
         return this.spawn(game, me, action.region);
       case ACTION_ATTACK:
-        return this.attack(game, me, action, slots);
+        return this.attack(game, me, action, slots, bordersWilderness);
       case ACTION_RETREAT_ALL:
         return this.retreatAll(me);
       case ACTION_BUILD:
@@ -136,6 +139,7 @@ export class ActionTranslator {
     me: Player,
     action: ActionVec,
     slots: (Player | null)[],
+    bordersWilderness?: boolean,
   ): Intent[] {
     const frac = TROOP_FRACTIONS[action.quantity] ?? 0.15;
     const troops = Math.floor(me.troops() * frac);
@@ -147,7 +151,9 @@ export class ActionTranslator {
     // region head is irrelevant for ATTACK — only require that we border
     // some wilderness.
     if (action.target === 0) {
-      if (!this.bordersWilderness(game, me)) {
+      const wild =
+        bordersWilderness ?? this.scanBordersWilderness(game, me);
+      if (!wild) {
         return [];
       }
       return [
@@ -166,11 +172,10 @@ export class ActionTranslator {
   }
 
   /**
-   * True when any unowned passable land borders any of my tiles — i.e. a
-   * wilderness invasion would actually expand us somewhere. Global (not
-   * per-region): ATTACK ignores the region head.
+   * Scan fallback: true when any unowned passable land borders any of my
+   * tiles. Prefer the ObsExtractor wilderness cache at translate time.
    */
-  private bordersWilderness(game: Game, me: Player): boolean {
+  scanBordersWilderness(game: Game, me: Player): boolean {
     for (const t of me.borderTiles()) {
       for (const n of game.map().neighbors(t)) {
         if (

@@ -91,18 +91,31 @@ export async function createGameRunner(
   return gr;
 }
 
+export interface GameRunnerOptions {
+  /**
+   * Skip client-only HUD name placement (`placeName` / `placeSpawnName`).
+   * Packed tile/player/attack updates, hashes, and tick execution stay
+   * identical. Default false so OpenFront client/worker behavior is unchanged.
+   */
+  skipNamePlacement?: boolean;
+}
+
 export class GameRunner {
   private turns: Turn[] = [];
   private currTurn = 0;
   private isExecuting = false;
 
   private playerViewData: Record<PlayerID, NameViewData> = {};
+  private readonly skipNamePlacement: boolean;
 
   constructor(
     public game: Game,
     private execManager: Executor,
     private callBack: (gu: GameUpdateViewData | ErrorUpdate) => void,
-  ) {}
+    options?: GameRunnerOptions,
+  ) {
+    this.skipNamePlacement = options?.skipNamePlacement === true;
+  }
 
   init() {
     if (this.game.config().gameConfig().gameType !== GameType.Singleplayer) {
@@ -174,29 +187,32 @@ export class GameRunner {
     // Track whether placements were recomputed this tick — the record is
     // only attached to the update when it could have changed, so the main
     // thread doesn't structured-clone an identical ~all-players record on
-    // every other tick.
+    // every other tick. AgentEnv skips this HUD work; packed tiles/hashes
+    // still drain below.
     let viewDataChanged = false;
-    if (this.game.inSpawnPhase()) {
-      for (const p of this.game.players()) {
-        if (p.type() !== PlayerType.Human && p.type() !== PlayerType.Nation) {
-          continue;
+    if (!this.skipNamePlacement) {
+      if (this.game.inSpawnPhase()) {
+        for (const p of this.game.players()) {
+          if (p.type() !== PlayerType.Human && p.type() !== PlayerType.Nation) {
+            continue;
+          }
+          if (p.spawnTile() === undefined) continue;
+          this.playerViewData[p.id()] = placeSpawnName(this.game, p);
+          viewDataChanged = true;
         }
-        if (p.spawnTile() === undefined) continue;
-        this.playerViewData[p.id()] = placeSpawnName(this.game, p);
+      }
+
+      const spawnJustEnded = wasInSpawnPhase && !this.game.inSpawnPhase();
+      if (
+        spawnJustEnded ||
+        this.game.ticks() < 3 ||
+        this.game.ticks() % 30 === 0
+      ) {
+        for (const p of this.game.players()) {
+          this.playerViewData[p.id()] = placeName(this.game, p);
+        }
         viewDataChanged = true;
       }
-    }
-
-    const spawnJustEnded = wasInSpawnPhase && !this.game.inSpawnPhase();
-    if (
-      spawnJustEnded ||
-      this.game.ticks() < 3 ||
-      this.game.ticks() % 30 === 0
-    ) {
-      for (const p of this.game.players()) {
-        this.playerViewData[p.id()] = placeName(this.game, p);
-      }
-      viewDataChanged = true;
     }
 
     const packedTileUpdates = this.game.drainPackedTileUpdates();

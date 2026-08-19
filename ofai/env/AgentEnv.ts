@@ -29,7 +29,7 @@ import {
 } from "../../src/core/game/GameUpdates";
 import { GameRunner } from "../../src/core/GameRunner";
 import { PseudoRandom } from "../../src/core/PseudoRandom";
-import { GameConfig, GameStartInfo } from "../../src/core/Schemas";
+import { GameConfig, GameStartInfo, Intent } from "../../src/core/Schemas";
 import { simpleHash } from "../../src/core/Util";
 import { ActionTranslator, ActionVec, UNIT_HEAD_ORDER } from "./ActionTranslator";
 import { makeObsBuffers, ObsBuffers, ObsExtractor } from "./ObsExtractor";
@@ -80,7 +80,18 @@ export interface StepResult {
     rewardTerms: RewardTerms;
     intentCount: number;
     actionAccepted: boolean;
+    map: string;
+    mapSize: string;
+    seed: string;
   };
+}
+
+export interface AgentEnvCreateOptions {
+  /**
+   * Skip HUD name placement in GameRunner. Default true for training.
+   * Packed tiles, hashes, rewards, masks, and renderFrame are unchanged.
+   */
+  skipNamePlacement?: boolean;
 }
 
 export class AgentEnv {
@@ -91,6 +102,7 @@ export class AgentEnv {
   private me!: Player;
   private extractor = new ObsExtractor();
   private translator = new ActionTranslator();
+  private skipNamePlacement = true;
   private obs: ObsBuffers = makeObsBuffers();
   private turnNumber = 0;
   private kills = 0;
@@ -120,8 +132,15 @@ export class AgentEnv {
     private terrain: TerrainCache,
   ) {}
 
-  static async create(cfg: EnvConfig, terrain: TerrainCache): Promise<AgentEnv> {
+  static async create(
+    cfg: EnvConfig,
+    terrain: TerrainCache,
+    options?: AgentEnvCreateOptions,
+  ): Promise<AgentEnv> {
     const env = new AgentEnv(cfg, terrain);
+    if (options?.skipNamePlacement === false) {
+      env.skipNamePlacement = false;
+    }
     await env.reset();
     return env;
   }
@@ -147,8 +166,17 @@ export class AgentEnv {
     }
   };
 
-  async reset(seed?: string): Promise<ObsBuffers> {
-    const cfg = { ...this.cfg, seed: seed ?? this.cfg.seed };
+  async reset(next?: string | Partial<EnvConfig>): Promise<ObsBuffers> {
+    if (typeof next === "string") {
+      this.cfg = { ...this.cfg, seed: next };
+    } else if (next !== undefined) {
+      const prevActions = this.cfg.allowedActions;
+      this.cfg = { ...this.cfg, ...next };
+      if (next.allowedActions !== undefined && next.allowedActions !== prevActions) {
+        this.allowedSet = null;
+      }
+    }
+    const cfg = this.cfg;
     const gameConfig: GameConfig = {
       gameMap: GameMapType[cfg.map as keyof typeof GameMapType],
       gameMapSize:
@@ -205,6 +233,7 @@ export class AgentEnv {
       this.game,
       new Executor(this.game, gameID, this.agentClientID),
       this.onUpdate,
+      { skipNamePlacement: this.skipNamePlacement },
     );
     this.runner.init();
     const me = this.game.playerByClientID(this.agentClientID);
@@ -317,7 +346,11 @@ export class AgentEnv {
 
       // canAttackPlayer is only immunity/friendly — attacks with no shared
       // border translate then immediately retreat. Require a land border.
-      if (me.canAttackPlayer(p) && me.sharesBorderWith(p)) {
+      // Flags were computed once in extract(); do not rescan borders.
+      if (
+        this.extractor.slotCanAttackPlayer(i) &&
+        this.extractor.slotSharesBorderWith(i)
+      ) {
         tm[attackRow + i] = 1;
         anyAttackTarget = true;
       }
@@ -402,6 +435,40 @@ export class AgentEnv {
     return this.extractor.hasAdjacentWilderness();
   }
 
+  peekSlots(): (Player | null)[] {
+    return this.slots;
+  }
+
+  /**
+   * Translate using an explicit wilderness flag (cache or scan) so tests
+   * can prove ActionTranslator cache-vs-scan equivalence.
+   */
+  translateForTest(action: ActionVec, bordersWilderness: boolean): Intent[] {
+    return this.translator.translate(
+      this.game,
+      this.me,
+      action,
+      this.slots,
+      bordersWilderness,
+    );
+  }
+
+  /** Cached slot border/attack flags match a live sharesBorderWith scan. */
+  slotFlagsMatchLive(): boolean {
+    for (let i = 1; i < NUM_PLAYER_SLOTS; i++) {
+      const p = this.slots[i];
+      const cachedBorder = this.extractor.slotSharesBorderWith(i);
+      const cachedAttack = this.extractor.slotCanAttackPlayer(i);
+      if (p === null) {
+        if (cachedBorder || cachedAttack) return false;
+        continue;
+      }
+      if (cachedBorder !== this.me.sharesBorderWith(p)) return false;
+      if (cachedAttack !== this.me.canAttackPlayer(p)) return false;
+    }
+    return true;
+  }
+
   /**
    * Scan-based wilderness check (reference for cache equality tests).
    * Cardinal neighbors only, matching GameMap.neighbors / neighbors4.
@@ -434,7 +501,14 @@ export class AgentEnv {
     const wasAlive = this.me.isAlive();
 
     // Translate against the slots from the observation the policy saw.
-    const intents = this.translator.translate(game, this.me, action, this.slots);
+    // Wilderness uses the extractor cache from that same extract.
+    const intents = this.translator.translate(
+      game,
+      this.me,
+      action,
+      this.slots,
+      this.extractor.hasAdjacentWilderness(),
+    );
     const stamped = intents.map((i) => ({
       ...i,
       clientID: this.agentClientID,
@@ -577,6 +651,9 @@ export class AgentEnv {
         rewardTerms: { ...terms },
         intentCount,
         actionAccepted,
+        map: this.cfg.map,
+        mapSize: this.cfg.mapSize,
+        seed: this.cfg.seed,
       },
     };
   }
