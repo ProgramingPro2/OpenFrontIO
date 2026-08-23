@@ -44,7 +44,11 @@ export function encodeFrame(
   const blobs: Buffer[] = [];
   let offset = 0;
   for (const [name, t] of Object.entries(tensors)) {
-    const buf = Buffer.from(t.data.buffer, t.data.byteOffset, t.data.byteLength);
+    const raw = t.data.buffer;
+    const buf =
+      raw instanceof SharedArrayBuffer
+        ? Buffer.from(new Uint8Array(raw, t.data.byteOffset, t.data.byteLength))
+        : Buffer.from(raw, t.data.byteOffset, t.data.byteLength);
     tensorSpecs[name] = {
       dtype: t.dtype,
       shape: [t.data.length],

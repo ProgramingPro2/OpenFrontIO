@@ -23,12 +23,22 @@ import {
 // 30 seconds at 10 ticks/second
 const MIRV_COOLDOWN_TICKS = 300;
 
-export class NationMIRVBehavior {
-  // Shared across all NationMIRVBehavior instances.
-  // Tracks the last tick a MIRV was sent at each player, so multiple nations don't pile-on the same target.
-  // Especially important for games with very high starting gold settings.
-  private static recentMirvTargets = new Map<PlayerID, Tick>();
+// Game-scoped pile-on cooldown. WeakMap identity is the Game object so two
+// sequential fixtures in one process cannot see each other's hits, while
+// every nation inside one game still shares the same map.
+const recentMirvTargetsByGame = new WeakMap<Game, Map<PlayerID, Tick>>();
 
+/** Game-scoped MIRV cooldown map. Exported for isolation tests. */
+export function recentMirvTargetsFor(game: Game): Map<PlayerID, Tick> {
+  let targets = recentMirvTargetsByGame.get(game);
+  if (targets === undefined) {
+    targets = new Map();
+    recentMirvTargetsByGame.set(game, targets);
+  }
+  return targets;
+}
+
+export class NationMIRVBehavior {
   constructor(
     private random: PseudoRandom,
     private game: Game,
@@ -238,13 +248,13 @@ export class NationMIRVBehavior {
 
   // MIRV Cooldown Methods
   private wasRecentlyMirved(target: Player): boolean {
-    const lastTick = NationMIRVBehavior.recentMirvTargets.get(target.id());
+    const lastTick = recentMirvTargetsFor(this.game).get(target.id());
     if (lastTick === undefined) return false;
     return this.game.ticks() - lastTick < MIRV_COOLDOWN_TICKS;
   }
 
   private recordMirvHit(target: Player): void {
-    NationMIRVBehavior.recentMirvTargets.set(target.id(), this.game.ticks());
+    recentMirvTargetsFor(this.game).set(target.id(), this.game.ticks());
   }
 
   // MIRV Helper Methods

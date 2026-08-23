@@ -1,6 +1,10 @@
 /**
- * Vectorized env server: runs K AgentEnv instances in one Node process and
- * serves batched reset/step over length-prefixed binary TCP frames.
+ * Vectorized env server: runs K AgentEnv instances and serves batched
+ * reset/step over length-prefixed binary TCP frames.
+ *
+ * Default backend is sequential (oracle / fallback). Pass --workers N>1
+ * or set OFAI_ENV_WORKERS to farm complete games across worker threads.
+ * Each worker owns its games and advances each game single-threadedly.
  *
  * Protocol (see framing.ts for the wire format):
  *   <- {cmd:"init", envs:[EnvConfig,...]}        -> {type:"inited"} + obs tensors
@@ -8,52 +12,30 @@
  *   <- {cmd:"reset", index, seed?|config?}       -> {type:"reset"} + obs tensors (K=1)
  *   <- {cmd:"close"}                             -> server exits
  *
- * Run: npx tsx ofai/env/EnvServer.ts --port 8765
+ * Run: npx tsx ofai/env/EnvServer.ts --port 8765 [--workers 4]
  */
 import net from "node:net";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { NodeGameMapLoader } from "../../tests/perf/fullgame/NodeGameMapLoader";
-import { AgentEnv } from "./AgentEnv";
-import { ActionVec } from "./ActionTranslator";
-import { BatchObs, stackObs } from "./batchObs";
+import {
+  encodeInit,
+  encodeReset,
+  encodeStep,
+  EnvBackend,
+  parseServerArgs,
+  resolveWorkerCount,
+  SequentialEnvBackend,
+} from "./EnvBackend";
 import { encodeFrame, FrameDecoder, frameTensors } from "./framing";
-import { ObsBuffers } from "./ObsExtractor";
-import { TerrainCache } from "./TerrainCache";
-import { resolveAutoReset } from "./autoReset";
+import { ParallelEnvBackend } from "./ParallelBackend";
 import { EnvConfig } from "./spec";
 
-const PROJECT_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../..",
-);
-
-function obsTensors(batch: BatchObs) {
-  return {
-    spatial: { dtype: "f32" as const, data: batch.spatial },
-    players: { dtype: "f32" as const, data: batch.players },
-    global: { dtype: "f32" as const, data: batch.global },
-    action_mask: { dtype: "u8" as const, data: batch.actionMask },
-    // Flattened [K, NUM_ACTION_TYPES, NUM_PLAYER_SLOTS] row-major.
-    target_masks: { dtype: "u8" as const, data: batch.targetMasks },
-    quantity_mask: { dtype: "u8" as const, data: batch.quantityMask },
-    unit_mask: { dtype: "u8" as const, data: batch.unitMask },
-    spawn_regions: { dtype: "u8" as const, data: batch.spawnRegions },
-    build_regions: { dtype: "u8" as const, data: batch.buildRegions },
-    boat_regions: { dtype: "u8" as const, data: batch.boatRegions },
-  };
-}
-
 class Server {
-  private envs: AgentEnv[] = [];
-  private batch: BatchObs | null = null;
-  private terrain = new TerrainCache(
-    new NodeGameMapLoader(path.join(PROJECT_ROOT, "resources/maps")),
-  );
+  private backend: EnvBackend;
+  private requestedWorkers: number;
+  private initialized = false;
 
-  private stacked(obsList: ObsBuffers[]): BatchObs {
-    this.batch = stackObs(obsList, this.batch ?? undefined);
-    return this.batch;
+  constructor(requestedWorkers: number) {
+    this.requestedWorkers = requestedWorkers;
+    this.backend = new SequentialEnvBackend();
   }
 
   async handle(
@@ -65,12 +47,15 @@ class Server {
       case "init":
         return this.init(header.envs as EnvConfig[]);
       case "step":
-        return this.step(header, blobs);
-      case "reset":
-        return this.reset(header);
+        return encodeStep(await this.backend.step(header, blobs));
+      case "reset": {
+        const result = await this.backend.reset(header);
+        return encodeReset(result.index, result.obs);
+      }
       case "frame":
         return this.frame(header);
       case "close":
+        await this.backend.close();
         setTimeout(() => process.exit(0), 100);
         return encodeFrame({ type: "closed" });
       default:
@@ -79,102 +64,58 @@ class Server {
   }
 
   private async init(configs: EnvConfig[]): Promise<Buffer> {
-    console.error(`[env-server] init: ${configs.length} envs`);
-    const t0 = performance.now();
-    this.envs = [];
-    // Create sequentially: map bin loading is I/O heavy but cached by Node.
-    for (const cfg of configs) {
-      this.envs.push(await AgentEnv.create(cfg, this.terrain));
+    if (this.initialized) {
+      await this.backend.close();
     }
-    const obs = this.envs.map((e) => e.peekObs());
+    const n = resolveWorkerCount(this.requestedWorkers, configs.length);
     console.error(
-      `[env-server] obs bytes/env: ${obs[0].spatial.byteLength + obs[0].players.byteLength} (spatial+players)`,
+      `[env-server] init: ${configs.length} envs requestedWorkers=${this.requestedWorkers} resolved=${n}`,
     );
-    console.error(
-      `[env-server] init done in ${(performance.now() - t0).toFixed(0)}ms`,
-    );
-    return encodeFrame(
-      { type: "inited", k: this.envs.length },
-      obsTensors(this.stacked(obs)),
-    );
-  }
-
-  private async step(
-    header: Record<string, unknown>,
-    blobs: Record<string, { buf: Buffer }>,
-  ): Promise<Buffer> {
-    const actionsBuf = blobs.actions.buf;
-    const k = this.envs.length;
-    const rewards = new Float32Array(k);
-    const dones = new Uint8Array(k);
-    const infos: Record<string, unknown>[] = [];
-    const obsList: ObsBuffers[] = [];
-    for (let i = 0; i < k; i++) {
-      const a: ActionVec = {
-        actionType: actionsBuf.readInt32LE(i * 20),
-        target: actionsBuf.readInt32LE(i * 20 + 4),
-        region: actionsBuf.readInt32LE(i * 20 + 8),
-        quantity: actionsBuf.readInt32LE(i * 20 + 12),
-        unit: actionsBuf.readInt32LE(i * 20 + 16),
-      };
-      const env = this.envs[i];
-      const result = env.step(a);
-      rewards[i] = result.reward;
-      dones[i] = result.done ? 1 : 0;
-      infos.push(result.info);
-      if (result.done) {
-        obsList.push(await this.resetDone(env, i, header));
-      } else {
-        obsList.push(result.obs);
+    const t0 = performance.now();
+    let backend: EnvBackend;
+    if (n <= 1) {
+      backend = new SequentialEnvBackend();
+    } else {
+      backend = new ParallelEnvBackend(n);
+      try {
+        const result = await backend.init(configs);
+        this.backend = backend;
+        this.initialized = true;
+        this.logInit(result.k, result.backend, result.workers, t0, result.obs);
+        return encodeInit(result);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[env-server] parallel workers failed (${message}); using sequential oracle`,
+        );
+        await backend.close();
+        backend = new SequentialEnvBackend();
       }
     }
-    return encodeFrame(
-      { type: "step", rewards: Array.from(rewards), dones: Array.from(dones), infos },
-      obsTensors(this.stacked(obsList)),
+    const result = await backend.init(configs);
+    this.backend = backend;
+    this.initialized = true;
+    this.logInit(result.k, result.backend, result.workers, t0, result.obs);
+    return encodeInit(result);
+  }
+
+  private logInit(
+    k: number,
+    backend: string,
+    workers: number,
+    t0: number,
+    obs: { spatial: Float32Array; players: Float32Array },
+  ): void {
+    console.error(
+      `[env-server] obs bytes/env: ${obs.spatial.byteLength / k + obs.players.byteLength / k} (spatial+players)`,
+    );
+    console.error(
+      `[env-server] init done in ${(performance.now() - t0).toFixed(0)}ms backend=${backend} workers=${workers}`,
     );
   }
 
-  /**
-   * Python owns the train seed stream and may send the next EnvConfig
-   * (seed + map) for a finished env. Watch / ad-hoc clients that omit
-   * nextConfigs keep the historical `{seed}-r{n}` fallback.
-   */
-  private async resetDone(
-    env: AgentEnv,
-    index: number,
-    header: Record<string, unknown>,
-  ): Promise<ObsBuffers> {
-    const nextConfigs = header.nextConfigs as
-      | Array<Partial<EnvConfig> | string | null | undefined>
-      | undefined;
-    const { spec, fallback } = resolveAutoReset(
-      nextConfigs,
-      index,
-      env.seed,
-      env.resetCount,
-    );
-    if (fallback) {
-      env.resetCount += 1;
-    }
-    return env.reset(spec);
-  }
-
-  private async reset(header: Record<string, unknown>): Promise<Buffer> {
-    const index = header.index as number;
-    const patch = header.config as Partial<EnvConfig> | undefined;
-    const seed = header.seed as string | undefined;
-    const obs = await this.envs[index].reset(patch ?? seed);
-    return encodeFrame(
-      { type: "reset", index },
-      obsTensors(this.stacked([obs])),
-    );
-  }
-
-  private frame(header: Record<string, unknown>): Buffer {
-    const index = (header.index as number) ?? 0;
-    const f = this.envs[index].renderFrame();
-    // Units are small and variable-length; send as JSON in the header.
-    // The map cells are the big payload and go as a u8 tensor.
+  private async frame(header: Record<string, unknown>): Promise<Buffer> {
+    const f = await this.backend.frame(header);
     return encodeFrame(
       {
         type: "frame",
@@ -189,47 +130,45 @@ class Server {
   }
 }
 
-function parseArgs(argv: string[]): { port: number } {
-  let port = 8765;
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--port") port = parseInt(argv[++i], 10);
-  }
-  return { port };
+const isMain =
+  process.argv[1] !== undefined &&
+  (process.argv[1].endsWith("EnvServer.ts") ||
+    process.argv[1].endsWith("EnvServer.js"));
+
+if (isMain) {
+  const { port, workers } = parseServerArgs(process.argv.slice(2));
+  const server = new Server(workers);
+
+  net
+    .createServer((socket) => {
+      console.error("[env-server] client connected");
+      const decoder = new FrameDecoder();
+      let chain: Promise<void> = Promise.resolve();
+      socket.on("data", (chunk) => {
+        const frames = decoder.push(chunk);
+        for (const frame of frames) {
+          const tensors = frameTensors(frame);
+          chain = chain.then(async () => {
+            try {
+              const reply = await server.handle(frame.header, tensors);
+              socket.write(reply);
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : String(err);
+              console.error("[env-server] error:", message);
+              socket.write(encodeFrame({ type: "error", error: message }));
+            }
+          });
+        }
+      });
+      socket.on("error", (err) => {
+        console.error("[env-server] socket error:", err);
+      });
+    })
+    .listen(port, () => {
+      console.error(
+        `[env-server] listening on port ${port} workers=${workers}`,
+      );
+    });
+
+  console.log(`ENV_SERVER_READY port=${port}`);
 }
-
-const { port } = parseArgs(process.argv.slice(2));
-const server = new Server();
-
-net
-  .createServer((socket) => {
-    console.error("[env-server] client connected");
-    const decoder = new FrameDecoder();
-    // Serialize handlers: overlapping `data` events must not interleave
-    // step/reset on the same AgentEnv instances.
-    let chain: Promise<void> = Promise.resolve();
-    socket.on("data", (chunk) => {
-      const frames = decoder.push(chunk);
-      for (const frame of frames) {
-        const tensors = frameTensors(frame);
-        chain = chain.then(async () => {
-          try {
-            const reply = await server.handle(frame.header, tensors);
-            socket.write(reply);
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error("[env-server] error:", message);
-            socket.write(encodeFrame({ type: "error", error: message }));
-          }
-        });
-      }
-    });
-    socket.on("error", (err) => {
-      console.error("[env-server] socket error:", err);
-    });
-  })
-  .listen(port, () => {
-    console.error(`[env-server] listening on port ${port}`);
-  });
-
-// Marker so the Python spawner knows the server is ready.
-console.log(`ENV_SERVER_READY port=${port}`);

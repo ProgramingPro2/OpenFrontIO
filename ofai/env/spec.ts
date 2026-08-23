@@ -105,6 +105,37 @@ export interface EnvConfig {
    * Terminating on the milestone taught policies to stop expanding.
    */
   winTilesFrac?: number;
+  /**
+   * Test-only. When true, step info includes the strong decision-boundary
+   * digest (tile/obs/mask/reward/intent/terminal). Training leaves this off.
+   */
+  enableDigest?: boolean;
+  /**
+   * Official GameConfig.startingGold passthrough. Unset keeps the core
+   * default (0). Oracle fixtures set this so later systems stay compact;
+   * training configs omit it.
+   */
+  startingGold?: number;
+  /**
+   * Official GameConfig.doomsdayClock passthrough. Unset leaves the clock
+   * off (core default). Only `enabled` and `speed` are wire-configurable.
+   */
+  doomsdayClock?: {
+    enabled?: boolean;
+    speed?: "slow" | "normal" | "fast" | "veryfast";
+  };
+  /**
+   * Official GameConfig.maxTimerValue passthrough (minutes). Unset leaves
+   * FFA win at 80% land. Oracle win fixtures set 1 so termination is compact.
+   */
+  maxTimerValue?: number;
+  /**
+   * Official GameConfig.disabledUnits passthrough. Unset leaves every unit
+   * enabled. Oracle nuke fixtures disable Hydrogen Bomb so nations fire
+   * atoms (one third of nations are hydro-only and otherwise erase the
+   * agent before an atom is observed).
+   */
+  disabledUnits?: string[];
 }
 
 export const DEFAULT_ENV_CONFIG: EnvConfig = {

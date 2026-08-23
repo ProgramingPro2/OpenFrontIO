@@ -111,15 +111,15 @@ export function compareOpponentRank(
  * for an untargetable aggregate.
  */
 export function assignOpponentSlots<T extends OpponentRankKey>(
-  metas: readonly T[],
+  metas: T[],
   individualSlots: number,
 ): { picked: T[]; rest: T[]; overflow: boolean } {
-  const sorted = metas.slice().sort(compareOpponentRank);
-  const overflow = sorted.length > individualSlots;
+  metas.sort(compareOpponentRank);
+  const overflow = metas.length > individualSlots;
   const n = overflow ? individualSlots - 1 : individualSlots;
   return {
-    picked: sorted.slice(0, n),
-    rest: overflow ? sorted.slice(n) : [],
+    picked: metas.slice(0, n),
+    rest: overflow ? metas.slice(n) : [],
     overflow,
   };
 }
@@ -130,6 +130,7 @@ interface OpponentMeta extends OpponentRankKey {
   canAttack: boolean;
   incomingTroops: number;
   allied: boolean;
+  allySignal: boolean;
 }
 
 export interface ObsBuffers {
@@ -204,6 +205,10 @@ export class ObsExtractor {
   // aggregate stay false / untargetable.
   private slotSharesBorder = new Uint8Array(NUM_PLAYER_SLOTS);
   private slotCanAttack = new Uint8Array(NUM_PLAYER_SLOTS);
+  private slotAllied = new Uint8Array(NUM_PLAYER_SLOTS);
+  private slotAllySignal = new Uint8Array(NUM_PLAYER_SLOTS);
+  private incomingFromScratch = new Set<string>();
+  private metaScratch: OpponentMeta[] = [];
 
   /** Full rebuild of every maintained structure. Call once per game. */
   buildStatic(game: Game, me: Player): void {
@@ -427,6 +432,14 @@ export class ObsExtractor {
     return this.slotCanAttack[slot] !== 0;
   }
 
+  slotAlliedWith(slot: number): boolean {
+    return this.slotAllied[slot] !== 0;
+  }
+
+  slotHasAllySignal(slot: number): boolean {
+    return this.slotAllySignal[slot] !== 0;
+  }
+
   private incomingTroopsFrom(me: Player, p: Player): number {
     let incomingTroops = 0;
     for (const atk of p.outgoingAttacks()) {
@@ -445,9 +458,7 @@ export class ObsExtractor {
     const canAttack = me.canAttackPlayer(p);
     const incomingTroops = this.incomingTroopsFrom(me, p);
     const allied = me.isAlliedWith(p);
-    const incomingAlly = me
-      .incomingAllianceRequests()
-      .some((r) => r.requestor().id() === p.id());
+    const incomingAlly = this.incomingFromScratch.has(p.id());
     const allySignal = incomingAlly || me.canSendAllianceRequest(p);
     return {
       player: p,
@@ -465,6 +476,7 @@ export class ObsExtractor {
       canAttack,
       incomingTroops,
       allied,
+      allySignal,
     };
   }
 
@@ -533,12 +545,18 @@ export class ObsExtractor {
     // Border / attackability is computed once per opponent and reused.
     this.slotSharesBorder.fill(0);
     this.slotCanAttack.fill(0);
-    const metas: OpponentMeta[] = [];
+    this.slotAllied.fill(0);
+    this.slotAllySignal.fill(0);
+    this.incomingFromScratch.clear();
+    for (const req of me.incomingAllianceRequests()) {
+      this.incomingFromScratch.add(req.requestor().id());
+    }
+    this.metaScratch.length = 0;
     for (const p of game.players()) {
       if (p.id() === me.id()) continue;
-      metas.push(this.opponentMeta(me, p));
+      this.metaScratch.push(this.opponentMeta(me, p));
     }
-    const assigned = assignOpponentSlots(metas, NUM_PLAYER_SLOTS - 1);
+    const assigned = assignOpponentSlots(this.metaScratch, NUM_PLAYER_SLOTS - 1);
     const slots: (Player | null)[] = [me, ...assigned.picked.map((m) => m.player)];
     while (slots.length < NUM_PLAYER_SLOTS) slots.push(null);
 
@@ -551,6 +569,8 @@ export class ObsExtractor {
       const slot = i + 1;
       this.slotSharesBorder[slot] = meta.sharesBorder ? 1 : 0;
       this.slotCanAttack[slot] = meta.canAttack ? 1 : 0;
+      this.slotAllied[slot] = meta.allied ? 1 : 0;
+      this.slotAllySignal[slot] = meta.allySignal ? 1 : 0;
       this.writePlayerFeatures(players, slot, me, meta, landTiles);
     }
     if (assigned.rest.length > 0) {
@@ -561,7 +581,10 @@ export class ObsExtractor {
     let myIncoming = 0;
     for (const atk of me.incomingAttacks()) myIncoming += atk.troops();
     const allPlayers = game.players();
-    const aliveCount = allPlayers.filter((p) => p.isAlive()).length;
+    let aliveCount = 0;
+    for (const p of allPlayers) {
+      if (p.isAlive()) aliveCount++;
+    }
     const tickProgress = game.ticks() / Math.max(1, maxTicks);
     g[0] = Math.max(0, Math.min(1, tickProgress));
     g[1] = game.inSpawnPhase() ? 1 : 0;

@@ -1,7 +1,12 @@
 /**
  * Reusable K-env observation batch used by EnvServer. Kept in a side-effect
  * free module so tests can import stackObs without starting a TCP listener.
+ *
+ * Training backends prefer attachBatch / allocOwnedBatch views so each env
+ * writes directly into the batch. stackObs remains the copy fallback and
+ * the oracle used by unit tests.
  */
+import { DType } from "./framing";
 import { ObsBuffers } from "./ObsExtractor";
 import {
   GLOBAL_FEATURES,
@@ -67,4 +72,20 @@ export function stackObs(obsList: ObsBuffers[], reuse?: BatchObs): BatchObs {
     batch.boatRegions.set(o.boatRegions, i * NUM_REGIONS);
   }
   return batch;
+}
+
+/** Wire tensor table. Shape is flat [elems] to match the existing TCP schema. */
+export function obsTensors(batch: BatchObs) {
+  return {
+    spatial: { dtype: "f32" as DType, data: batch.spatial },
+    players: { dtype: "f32" as DType, data: batch.players },
+    global: { dtype: "f32" as DType, data: batch.global },
+    action_mask: { dtype: "u8" as DType, data: batch.actionMask },
+    target_masks: { dtype: "u8" as DType, data: batch.targetMasks },
+    quantity_mask: { dtype: "u8" as DType, data: batch.quantityMask },
+    unit_mask: { dtype: "u8" as DType, data: batch.unitMask },
+    spawn_regions: { dtype: "u8" as DType, data: batch.spawnRegions },
+    build_regions: { dtype: "u8" as DType, data: batch.buildRegions },
+    boat_regions: { dtype: "u8" as DType, data: batch.boatRegions },
+  };
 }

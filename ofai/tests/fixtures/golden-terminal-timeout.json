@@ -1,0 +1,210 @@
+{
+  "name": "terminal-timeout",
+  "config": {
+    "map": "Halkidiki",
+    "mapSize": "Compact",
+    "nations": "disabled",
+    "difficulty": "Easy",
+    "bots": 0,
+    "seed": "golden-timeout",
+    "maxTicks": 80,
+    "decisionInterval": 10,
+    "shaping": 0,
+    "enableDigest": true
+  },
+  "actions": [
+    [
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "init": {
+    "tick": 5,
+    "coreHash": 15162773300001,
+    "digest": "0ea6f4271aff74ce6aaee82d43059d7c6d478fe73a37319686690acdf2abf40a",
+    "tileDigest": "cc04a9b9a5b565e3f408a36a5293d392e06a9597c125a603cbce633f103080fd",
+    "obsDigest": "fb7a92e9dc9f5c0d8b2a00aea3c15df36b34789327dd8b865a6e881b7881a834",
+    "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+    "reward": 0,
+    "intentCount": 0,
+    "actionAccepted": true,
+    "terminalCause": "none",
+    "win": false,
+    "stageSuccess": false,
+    "tilesFrac": 0
+  },
+  "boundaries": [
+    {
+      "tick": 15,
+      "coreHash": 16002184429889,
+      "digest": "0d660779935b82e890e92daf22d3aa5b6506442035d7fbab4cc245ee69e96a47",
+      "tileDigest": "e7007c5192f6c940b0015b29b991090138e7d0faecc0e4e50472392e4a9f62e4",
+      "obsDigest": "562045cd53160684e0c64d9afee3f253af987efc6a740315a7b33015bd94e761",
+      "stepDigest": "f43001ce75139d67eb049f5d9cece8b86b3d236f50b5b26029152decb3a91ce5",
+      "reward": 0.1,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 25,
+      "coreHash": 18098286210881,
+      "digest": "5317af1d0d71cde1a61b8a16e6b0284e4354221d34f259d8ccbc1901e395c96e",
+      "tileDigest": "5f81184de98ab607232ccdb1496d665f4c9f745c6b5ce779bc59b4e8f0a01f5d",
+      "obsDigest": "5a6b28035bec73611d101a26f49ebcfe87dc79901d596c859bf63ffdb03f55d8",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 35,
+      "coreHash": 20295675317517,
+      "digest": "ae8270a6270dbaaf204e0299a3483a1cb2b938f9a7411dde8d9c0f902eada14c",
+      "tileDigest": "8f1021ca3b98c49392df665f8b0c5da509bf1bead66dc29f8e2e498a94cab439",
+      "obsDigest": "e320a7fee859befb845607949a64f44d612d2547f04fce006eb285a340b0b303",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 45,
+      "coreHash": 22576762932769,
+      "digest": "415d52f80bbaf0fdb018812bcdf63745042ad8c87e3fa5f6bf9052f7f6fea518",
+      "tileDigest": "315ba1eb6ab8bc43aaa454011d6bb755bcb2b3f5f75c075ba47854a5c75d15fa",
+      "obsDigest": "9efa5cc5d87fe5030287de28fbefc68d3331613f307831209b2013582456bed1",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 55,
+      "coreHash": 24925779772405,
+      "digest": "583776ba2a72b4a9b311aa4f867bc431a83d8822e27df1fddc0ec6c23c7f3c80",
+      "tileDigest": "084ddc0da6b2b933ffb435af5e8534f12247b077b9a91b906c891075fbfcd114",
+      "obsDigest": "f9e1d53b49b0fb8b1acf60348638aaced37d20b4350c6af45a2742dbca74da9e",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 65,
+      "coreHash": 27321497953805,
+      "digest": "bffd0907627ad09a033c9283375300ecbe5e2bd2ffcca3e2ea7b4bf207342c53",
+      "tileDigest": "41d898e46e7af50de39aaafafb226ec69b94307e321d88860bd19055989020d0",
+      "obsDigest": "3e422d4fab7deeaab63b733f072b7265edf254b9939bc64436189abfe11fef44",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 75,
+      "coreHash": 29746328659941,
+      "digest": "5a2259816828d65ceed6c7b96311c018f12ca7b6a8ec487770dba10f953904e1",
+      "tileDigest": "61ec7027adc6617db84d48afade08310fe749b8f096cb75cd429c702461d891b",
+      "obsDigest": "75f2ab04b7f8968ecadf0e2ddf1e18b6f183ecfb3a9733ab791e3199303c67b7",
+      "stepDigest": "5bb7f556892551b3c4701d4b47d015aa3c888f2acee8d771b479ad35ae7aa50a",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 85,
+      "coreHash": 32178437497261,
+      "digest": "b0e4fc2fb66673ce2ff0c142b7decac712b005cc340a890108bec1fc3ab48667",
+      "tileDigest": "a94b010bd944b38a4bc55664ee3ff0d23b1bd09b29b62368dd6d2a04f987efc2",
+      "obsDigest": "897a0a700e91ace730c45b07e34d4b6bc4558e19acd92f3695c2f5606bfcb735",
+      "stepDigest": "ff2bc07db5f1e2655bd74d70b64bcf2a803d7562a062466edfe25d88a33f77be",
+      "reward": -1,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "timeout",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    }
+  ]
+}

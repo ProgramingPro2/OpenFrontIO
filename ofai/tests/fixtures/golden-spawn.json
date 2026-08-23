@@ -1,0 +1,122 @@
+{
+  "name": "spawn",
+  "config": {
+    "map": "FourIslands",
+    "mapSize": "Compact",
+    "nations": "disabled",
+    "difficulty": "Easy",
+    "bots": 0,
+    "seed": "golden-spawn",
+    "maxTicks": 400,
+    "decisionInterval": 10,
+    "shaping": 0,
+    "enableDigest": true
+  },
+  "actions": [
+    [
+      1,
+      0,
+      2,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "init": {
+    "tick": 5,
+    "coreHash": 52339907800001,
+    "digest": "217e1f0b0a498cda86c388d656757a5a38cac5fdd91fccd97c6206adbc8499b7",
+    "tileDigest": "64803d05290400ed06dba857506f5da34acf7dd0054a7035426b7fe259d87969",
+    "obsDigest": "51bb41ad41005d08fc7fd8512db5aa337480d8b6913c2fc4ad86f1c723b0fac8",
+    "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+    "reward": 0,
+    "intentCount": 0,
+    "actionAccepted": true,
+    "terminalCause": "none",
+    "win": false,
+    "stageSuccess": false,
+    "tilesFrac": 0
+  },
+  "boundaries": [
+    {
+      "tick": 15,
+      "coreHash": 55120203702337,
+      "digest": "c9b159f82e7eed0e67c52a1e285c9fe7f1a2dc02b03dd69f866b9c269394935f",
+      "tileDigest": "8076c3a77fdf7708620f31275373c544ba704423fcabb0100e730f223089bee2",
+      "obsDigest": "9ce6a9acb19939525ab415199e30675cda3831428ef9043e7758972e7bc867fa",
+      "stepDigest": "c2a5e3924f7b9a9f5a60280b4fc648f9e22a227627f51fcb130c53c49d324b09",
+      "reward": 0.1,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00018
+    },
+    {
+      "tick": 25,
+      "coreHash": 62190278447961,
+      "digest": "3edd0ee776e40f5c5ce7279580b9d9bae3de53678a22eabcc0dcdad52bd84b94",
+      "tileDigest": "3d166fd439de1a411bffa01132126682da02de26cfb9de6709d29a06c123a2e6",
+      "obsDigest": "e8c1cbcb11fc747cff753f23f2faff24cda6c7090f8e45827b9fc4f088bcf03c",
+      "stepDigest": "bf3c518e4bd721dbad06cbbf7bc94cc9407a9686843233f1232246e2b4d3df1f",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00018
+    },
+    {
+      "tick": 35,
+      "coreHash": 69566018255137,
+      "digest": "bb6467d012999ccc6bd9b8b7a7337957a7a560df26ce012166f5fe985a586dc0",
+      "tileDigest": "2fb0e4db6268a06ca1edfaaaa4f66d5a9688f9c8944fc10e0d3891004452e06d",
+      "obsDigest": "0a7461bfe315a82f75fd627e963b981a538a503a2963d59addc0d3849409ba8a",
+      "stepDigest": "bf3c518e4bd721dbad06cbbf7bc94cc9407a9686843233f1232246e2b4d3df1f",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00018
+    },
+    {
+      "tick": 45,
+      "coreHash": 77195083216065,
+      "digest": "c1bec96fa3e579a6a43dc25b15ca9ff64946ed43921d1c45fa8b5a6d4d5c6066",
+      "tileDigest": "e73dec442bcc59bf9712205fdeb3eba977e25cdaf4da22019a338c0d935f92cc",
+      "obsDigest": "c950e3f72b2c70fdfb277984375593b8d57b03a16ed96bc6e61941bd788e7324",
+      "stepDigest": "bf3c518e4bd721dbad06cbbf7bc94cc9407a9686843233f1232246e2b4d3df1f",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00018
+    }
+  ]
+}

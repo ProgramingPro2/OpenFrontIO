@@ -1,0 +1,122 @@
+{
+  "name": "terminal-no-spawn",
+  "config": {
+    "map": "Halkidiki",
+    "mapSize": "Compact",
+    "nations": "disabled",
+    "difficulty": "Easy",
+    "bots": 0,
+    "seed": "golden-no-spawn",
+    "maxTicks": 40,
+    "decisionInterval": 10,
+    "shaping": 0,
+    "enableDigest": true
+  },
+  "actions": [
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "init": {
+    "tick": 5,
+    "coreHash": 6228525175001,
+    "digest": "16bff5fe4df2fdda7cd35fb9a3df73a8e513f9ea7388d8ade07bbf925217898e",
+    "tileDigest": "c5f33fdea014088a3a93021d926b13bc602993faccb28a6c740e2e68bc2edbe4",
+    "obsDigest": "6a7254fa5cb9180ff6f4cc8da0ec83a5a6f7e2480c8d2991136c4acb26cbd681",
+    "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+    "reward": 0,
+    "intentCount": 0,
+    "actionAccepted": true,
+    "terminalCause": "none",
+    "win": false,
+    "stageSuccess": false,
+    "tilesFrac": 0
+  },
+  "boundaries": [
+    {
+      "tick": 15,
+      "coreHash": 6228525175001,
+      "digest": "aa39ce7a8371124bc95b38983f0fe2957fe6c747bdcb2ef135c564d3bf7638fb",
+      "tileDigest": "d1980152414b91697f472b021c3614bf33d88de0a1b879ad6732ed852be086c7",
+      "obsDigest": "acc8d29eee9bd2867371f0509d2b1717066f860e668cb8a1cf2ce1b76b9ea7d3",
+      "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0
+    },
+    {
+      "tick": 25,
+      "coreHash": 6228525175001,
+      "digest": "4de8deffa14f6e15587f6d91611e49017f478b881a3d3c5df618a82526628033",
+      "tileDigest": "d5df05a34c5ed47282c4a4a91e3de5731a4c1be703bd541aaafecf5f52794c7f",
+      "obsDigest": "e289ac12a8719cc6eff8b97a5770b79a352c19c1876767438e9b18dada8c9583",
+      "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0
+    },
+    {
+      "tick": 35,
+      "coreHash": 6228525175001,
+      "digest": "7d24f99a034c08085dfde454a62da87ad8e2c6a86b058e6a2df529a8973efa07",
+      "tileDigest": "25b473afa269591812fee3ea93ea9f0819d40d9a88407e2f674ca7621c2bb39e",
+      "obsDigest": "c4f8ef618d7432383439564385073f195a2130ad109282fce822d232c9fd3c64",
+      "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+      "reward": 0,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0
+    },
+    {
+      "tick": 45,
+      "coreHash": 6228525175001,
+      "digest": "2b234b4b9ecd4e33f69e3b70f2111e49f97eb25f05a68d8df65322de0e93ac06",
+      "tileDigest": "0a05c9c8dbd13a96f09efb9cd081f5735c1bb9cbd93663d7165b612a7db42f77",
+      "obsDigest": "1fec4465af58004d70f750363bf25776db4436df894e245b0da2fa048f0da24b",
+      "stepDigest": "68787b5473fa431fd5d2e1ef4dace3cbf894af6dc11c52b1975b125f2a883cc8",
+      "reward": -1,
+      "intentCount": 0,
+      "actionAccepted": true,
+      "terminalCause": "no_spawn",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0
+    }
+  ]
+}

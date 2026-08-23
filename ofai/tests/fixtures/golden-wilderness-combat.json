@@ -1,0 +1,298 @@
+{
+  "name": "wilderness-combat",
+  "config": {
+    "map": "Halkidiki",
+    "mapSize": "Compact",
+    "nations": "disabled",
+    "difficulty": "Easy",
+    "bots": 0,
+    "seed": "golden-wilderness",
+    "maxTicks": 2000,
+    "decisionInterval": 10,
+    "shaping": 0,
+    "enableDigest": true
+  },
+  "actions": [
+    [
+      1,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "init": {
+    "tick": 5,
+    "coreHash": 37667772625001,
+    "digest": "d7fa7ca4bf4104db857c9f1422e7a789aa62e793871317fe4f3e225b70f7b2ad",
+    "tileDigest": "b1d09062a59bff8799f2a2f2fc3b7331ed184be5e047010d56cc6715b8562875",
+    "obsDigest": "61d674cf3e19d18d65548c799546892ce60fdd111dfc6e31f084f032f48272d1",
+    "stepDigest": "4983b373745af2a6bbdc245441cd29f051d732df6f20562fbbc83fd677f69499",
+    "reward": 0,
+    "intentCount": 0,
+    "actionAccepted": true,
+    "terminalCause": "none",
+    "win": false,
+    "stageSuccess": false,
+    "tilesFrac": 0
+  },
+  "boundaries": [
+    {
+      "tick": 15,
+      "coreHash": 39753060517521,
+      "digest": "9f0e206309fdb3fb42b32b20ff2ec7f8c8291a0d0f60c9025452b267958680bd",
+      "tileDigest": "4e52dbeae90e123cfb26b26ceaf7004488fca64a05ee34062321f198f8623c02",
+      "obsDigest": "8a601728cf40c9c99dccbc0d1f8b1a99276573043cd03a303d3ccee22ceea7fc",
+      "stepDigest": "f43001ce75139d67eb049f5d9cece8b86b3d236f50b5b26029152decb3a91ce5",
+      "reward": 0.1,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000122
+    },
+    {
+      "tick": 25,
+      "coreHash": 42852364849106,
+      "digest": "34c7cf90c3169a206728f809fa1c89d559996d64f38dbe794aa9324aebc1fb4a",
+      "tileDigest": "0d59572c3f365280015c8cff747a17c5e1b2549a8662bdc2daab6bbf8a24f3c1",
+      "obsDigest": "7655d6f08e439bbbb6a185acc9901bc31472e73aa1d8df5b4b033331626fff06",
+      "stepDigest": "3c95eb252c84162a1ba452ecdd7bf0a9517cf2e8aa98993081526018bf9e74a6",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00018
+    },
+    {
+      "tick": 35,
+      "coreHash": 46063165787661,
+      "digest": "03357024f2a728f27ffc62751b406938293abe50ed17dc40ba11fd2a6e609e72",
+      "tileDigest": "0b7772f61de73d28f0f5f6a7f802fd2f56e37886db386b49e7a0347b7253265e",
+      "obsDigest": "75d997447bb45922b9a2d21231236f9a580a5fb25d2db8c6509c12844d552f10",
+      "stepDigest": "9d316b2a0294611bc2c04d1f20049e6156ddfa3b9998fbd8f49662713d14d3cd",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000292
+    },
+    {
+      "tick": 45,
+      "coreHash": 49432171371241,
+      "digest": "f14fd8c45cb80ba599116efa27b7f06a9f96751fa7c2d9f07cbd34f709da9547",
+      "tileDigest": "38807c4d523cea2a2d20a9bf69794029ac71c986d03b7620fc9378a6503b3c41",
+      "obsDigest": "b66071fc3852a5d5c50851ebaef0441e257c5f8f2caf3ac636da2af705bd38ad",
+      "stepDigest": "2bc476b346342764b70a7221dfd1392313361cf1895d818d0c63a1cf4d5c5edc",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000474
+    },
+    {
+      "tick": 55,
+      "coreHash": 52983488974326,
+      "digest": "8f3c9e3e0a69d066accdfd0db66b0662c7b22cba1193c1f615658b571663e8a2",
+      "tileDigest": "5a07fa00763795163bcb6205c2ffd9caf1e42ed593163dce3d4d03c1ea581815",
+      "obsDigest": "2af52cbd25928c46456750bfc95f5cedc77423618e66818959c72bfeac31fffc",
+      "stepDigest": "c192c12a07ac6176cef4aa02de54254c6407d7ee9a4044f29ddfb7ddf8769925",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00071
+    },
+    {
+      "tick": 65,
+      "coreHash": 56721638729631,
+      "digest": "cb4502b064eeb51b54d3fc5d16960a39e765f8bdb4bfe04219b36b7cc141497f",
+      "tileDigest": "5af36483670c1331d4be5144b1ac91367421e5e600c6c57a42405a6990a4f974",
+      "obsDigest": "3b1a1732a6885a616277a7c392c3660ddb34437dcbb300ac62f4fdcfeea6bc43",
+      "stepDigest": "688702c1d1bc4a9bdafea6fcf83c8dc107e9ec1950b6fe7e09169142b6d3b429",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.000998
+    },
+    {
+      "tick": 75,
+      "coreHash": 60631553528106,
+      "digest": "bd3339e9cce87527487548cba3ec05b84591800e58bff87cfbe6c20bbdcde652",
+      "tileDigest": "5b44727563f88552a654e866612788ad86a9c5c9d1a3cc716459ab22349e6288",
+      "obsDigest": "646937d209605ab2e1d6392a8b6696e61ba2f6556031232c995888f6577e589f",
+      "stepDigest": "d70d2ce3850dac32ab4dcec7ddf8bfa3f5d4b31c48fce52cafbdc3ca232c7e39",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.001313
+    },
+    {
+      "tick": 85,
+      "coreHash": 64678579018936,
+      "digest": "013c6a6a8a3408d52bcaba194e5d4d663fc7629bff65abd32623f7aa5390651e",
+      "tileDigest": "040f06a682c80f0a202185523b6ea4ac20e1c614b8a3bb02cba34abdf98108e8",
+      "obsDigest": "e8254cf7e5664dd2ce8dd00cdc880088240cc7e95637b39bdba5d79eea8ba2cf",
+      "stepDigest": "480582c907533b2f1321227ec87fca31c21672dfaf45ee52c8bd3d0c4f891410",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.001627
+    },
+    {
+      "tick": 95,
+      "coreHash": 68846141382166,
+      "digest": "7260474ce046c0b92e1f0264d1804682cbb809cae12b3c237ba2a2f8068b7533",
+      "tileDigest": "2fc252acdcccbba1cf16a71ad5931e9b122dd0df1c8bf55151f15139d9739f5b",
+      "obsDigest": "51af9bb121ad455c7709ff249bd3145d4732e0018c714eca2e31a7397c409a2d",
+      "stepDigest": "82f4fe34da44af9aeb728f868cc28fdba003d61e90c4a8e1d14230511b8cb8f4",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00193
+    },
+    {
+      "tick": 105,
+      "coreHash": 73101092977886,
+      "digest": "d3536db0b3a9f56847082387284c696cbf41d7b2e5200adfc68715733b8d5f27",
+      "tileDigest": "c3d44388004c6fee57326e0d425d62d9aa109acff0830a2d7ee3876c12b61163",
+      "obsDigest": "9692f190a45566258f3bd0d78d5b6bab092b9d0231b56747e421bf83e3f61a01",
+      "stepDigest": "03ad1a145418de3913afd61e00565a7789ca6e1ea9347892c6914f9fbd75095d",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.00223
+    },
+    {
+      "tick": 115,
+      "coreHash": 77450967360621,
+      "digest": "09518a1b210928ed30157bf007af4eace87b3947465a2938187663e988ec1ab9",
+      "tileDigest": "4b4cec30cc8c003daeeea9c689a55fc841fe33f22636062ad41aebe452be37af",
+      "obsDigest": "ba0e71c9e6b2ef83bf09464533ab991910040b18a570314da637e944c8799739",
+      "stepDigest": "8acfaee3d9a22caaca922d3e0f9a457eb2877bf63f9abc96e7ab325e13c43def",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.002545
+    },
+    {
+      "tick": 125,
+      "coreHash": 81900284663086,
+      "digest": "cc7902507151280571ebadbd4c150950cbb15fbbee2c60c2dea4391e2cc7918c",
+      "tileDigest": "83920b1f8a4c6180ba743a8ebe02c286247803949755e98b2e79c90af935f5e4",
+      "obsDigest": "e9529de4e351cf19a683adc8679f43ac03fb46860e5779a927122aa50eb64ee1",
+      "stepDigest": "9fed283eb7177ffe32e527cde9f4fd5ad042358b808fc10dcb2adacbe9cf3f2d",
+      "reward": 0,
+      "intentCount": 1,
+      "actionAccepted": true,
+      "terminalCause": "none",
+      "win": false,
+      "stageSuccess": false,
+      "tilesFrac": 0.002896
+    }
+  ]
+}

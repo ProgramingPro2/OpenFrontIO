@@ -20,8 +20,10 @@ import {
   PlayerType,
   UnitType,
 } from "../../src/core/game/Game";
+import { TileRef } from "../../src/core/game/GameMap";
 import { createGame } from "../../src/core/game/GameImpl";
 import { createNationsForGame } from "../../src/core/game/NationCreation";
+import { recentMirvTargetsFor } from "../../src/core/execution/nation/NationMIRVBehavior";
 import {
   ErrorUpdate,
   GameUpdateType,
@@ -50,7 +52,6 @@ import {
   NUM_ACTION_TYPES,
   NUM_PLAYER_SLOTS,
   NUM_QUANTITIES,
-  NUM_UNIT_TYPES,
   REWARD_DEATH,
   REWARD_LOSS_ALIVE,
   REWARD_NO_SPAWN,
@@ -61,6 +62,11 @@ import {
   TerminalCause,
   TROOP_FRACTIONS,
 } from "./spec";
+import {
+  computeDecisionBoundary,
+  DecisionBoundary,
+  StepDigestInput,
+} from "./stateDigest";
 
 export interface StepResult {
   obs: ObsBuffers;
@@ -83,7 +89,19 @@ export interface StepResult {
     map: string;
     mapSize: string;
     seed: string;
+    /** Present only when EnvConfig.enableDigest is set (tests / goldens). */
+    digest?: string;
+    tileDigest?: string;
+    obsDigest?: string;
+    stepDigest?: string;
   };
+}
+
+export interface EnvStepProfile {
+  simMs: number;
+  maskObsMs: number;
+  extractMs: number;
+  maskFillMs: number;
 }
 
 export interface AgentEnvCreateOptions {
@@ -92,6 +110,11 @@ export interface AgentEnvCreateOptions {
    * Packed tiles, hashes, rewards, masks, and renderFrame are unchanged.
    */
   skipNamePlacement?: boolean;
+  /**
+   * Write observations into this buffer (a view into a fixed batch).
+   * Training backends bind per-env slices so stacking does not copy.
+   */
+  obs?: ObsBuffers;
 }
 
 export class AgentEnv {
@@ -116,6 +139,24 @@ export class AgentEnv {
   private initialOpponentCount = 1;
   private slots: (Player | null)[] = [];
   private allowedSet: Set<number> | null = null;
+  private lastStepMeta: StepDigestInput = {
+    reward: 0,
+    intentCount: 0,
+    actionAccepted: true,
+    terminalCause: "none",
+    win: false,
+    stageSuccess: false,
+    dead: false,
+    tilesFrac: 0,
+    peakTilesFrac: 0,
+    kills: 0,
+  };
+  lastProfile: EnvStepProfile = {
+    simMs: 0,
+    maskObsMs: 0,
+    extractMs: 0,
+    maskFillMs: 0,
+  };
   resetCount = 0;
 
   get seed(): string {
@@ -140,6 +181,9 @@ export class AgentEnv {
     const env = new AgentEnv(cfg, terrain);
     if (options?.skipNamePlacement === false) {
       env.skipNamePlacement = false;
+    }
+    if (options?.obs !== undefined) {
+      env.obs = options.obs;
     }
     await env.reset();
     return env;
@@ -192,6 +236,18 @@ export class AgentEnv {
       infiniteTroops: false,
       instantBuild: false,
       randomSpawn: false,
+      ...(cfg.startingGold !== undefined
+        ? { startingGold: cfg.startingGold }
+        : {}),
+      ...(cfg.doomsdayClock !== undefined
+        ? { doomsdayClock: cfg.doomsdayClock }
+        : {}),
+      ...(cfg.maxTimerValue !== undefined
+        ? { maxTimerValue: cfg.maxTimerValue }
+        : {}),
+      ...(cfg.disabledUnits !== undefined
+        ? { disabledUnits: cfg.disabledUnits as GameConfig["disabledUnits"] }
+        : {}),
     };
     const gameID = cfg.seed;
     // Manual wiring mirroring createGameRunner(), but with fresh GameMapImpl
@@ -250,12 +306,26 @@ export class AgentEnv {
     this.wasSpawned = false;
     this.peakTilesFrac = 0;
     this.extractor.buildStatic(this.game, this.me);
+    this.translator.clearCaches();
     // Let tribes/nations place their spawns before the agent's first decision.
     this.runTicks(5);
     this.initialOpponentCount = Math.max(
       1,
       this.game.players().filter((p) => p.id() !== this.me.id()).length,
     );
+    this.lastStepMeta = {
+      reward: 0,
+      intentCount: 0,
+      actionAccepted: true,
+      terminalCause: "none",
+      win: false,
+      stageSuccess: false,
+      dead: false,
+      tilesFrac: 0,
+      peakTilesFrac: 0,
+      kills: 0,
+    };
+    this.lastProfile = { simMs: 0, maskObsMs: 0, extractMs: 0, maskFillMs: 0 };
     return this.extractObs();
   }
 
@@ -268,13 +338,19 @@ export class AgentEnv {
   }
 
   private extractObs(): ObsBuffers {
+    const t0 = performance.now();
     this.slots = this.extractor.extract(
       this.game,
       this.me,
       this.obs,
       this.cfg.maxTicks,
     );
+    const extractMs = performance.now() - t0;
     this.fillMasks(this.slots);
+    const maskFillMs = performance.now() - t0 - extractMs;
+    this.lastProfile.extractMs = extractMs;
+    this.lastProfile.maskFillMs = maskFillMs;
+    this.lastProfile.maskObsMs = extractMs + maskFillMs;
     return this.obs;
   }
 
@@ -313,7 +389,12 @@ export class AgentEnv {
     // Spawn phase waits for the Human agent, so allowing NOOP here lets a
     // greedy policy skip the game forever and never hit no_spawn.
     if (inSpawn && !spawned) {
-      am[ACTION_SPAWN] = 1;
+      const anySpawn = this.translator.fillEffectiveSpawnRegions(
+        game,
+        me,
+        this.obs.spawnRegions,
+      );
+      am[ACTION_SPAWN] = anySpawn ? 1 : 0;
       this.applyAllowedActionsGate(inSpawn, spawned);
       return;
     }
@@ -355,15 +436,12 @@ export class AgentEnv {
         anyAttackTarget = true;
       }
 
-      const incomingFromThem = me
-        .incomingAllianceRequests()
-        .some((r) => r.requestor().id() === p.id());
-      if (me.canSendAllianceRequest(p) || incomingFromThem) {
+      if (this.extractor.slotHasAllySignal(i)) {
         tm[allyRow + i] = 1;
         anyAllyTarget = true;
       }
 
-      if (me.isAlliedWith(p)) {
+      if (this.extractor.slotAlliedWith(i)) {
         tm[breakRow + i] = 1;
         anyBreakTarget = true;
       } else {
@@ -373,26 +451,30 @@ export class AgentEnv {
       }
     }
 
-    const um = this.obs.unitMask;
-    let anyUnit = false;
-    const gold = me.gold();
-    for (let u = 0; u < NUM_UNIT_TYPES; u++) {
-      const unitType = UNIT_HEAD_ORDER[u];
-      if (game.config().isUnitDisabled(unitType)) continue;
-      const cost = game.unitInfo(unitType).cost(game, me);
-      if (cost <= gold) {
-        um[u] = 1;
-        anyUnit = true;
-      }
-    }
+    const anyBuild = this.translator.fillEffectiveBuildMasks(
+      game,
+      me,
+      this.obs.unitMask,
+      this.obs.buildRegions,
+    );
+    // Boat dest scan is pointless without a troop quantity; BOAT stays
+    // illegal and region bits remain the extractor over-approx.
+    const anyBoatDest =
+      anyQuantity &&
+      this.translator.fillEffectiveBoatRegions(
+        game,
+        me,
+        this.obs.boatRegions,
+      );
 
     am[ACTION_ATTACK] = anyAttackTarget && anyQuantity ? 1 : 0;
-    am[ACTION_RETREAT_ALL] = me.outgoingAttacks().length > 0 ? 1 : 0;
-    am[ACTION_BUILD] = anyUnit && me.numTilesOwned() > 0 ? 1 : 0;
-    // Transport ships launch from shoreline (canBuildTransportShip); a Port
-    // is not required. Gating on Port made boat never-legal before build.
-    am[ACTION_BOAT] =
-      this.obs.boatRegions.some((v) => v === 1) && anyQuantity ? 1 : 0;
+    am[ACTION_RETREAT_ALL] = me.outgoingAttacks().some((a) => !a.retreating())
+      ? 1
+      : 0;
+    am[ACTION_BUILD] = anyBuild ? 1 : 0;
+    // Transport ships must have a launchable dest (canBuildTransportShip)
+    // and a troop quantity. A Port is not required.
+    am[ACTION_BOAT] = anyBoatDest && anyQuantity ? 1 : 0;
     am[ACTION_ALLY] = anyAllyTarget ? 1 : 0;
     am[ACTION_BREAK_ALLY] = anyBreakTarget ? 1 : 0;
     am[ACTION_EMBARGO] = anyEmbargoTarget ? 1 : 0;
@@ -453,6 +535,45 @@ export class AgentEnv {
     );
   }
 
+  /** Recompute masks from the current extract without advancing the sim. */
+  refillMasksForTest(): void {
+    this.fillMasks(this.slots);
+  }
+
+  /** Drop translator legality caches (tests compare warm vs cold refill). */
+  clearTranslatorCachesForTest(): void {
+    this.translator.clearCaches();
+  }
+
+  effectiveMasksSnapshot(): {
+    actionMask: number[];
+    unitMask: number[];
+    boatRegions: number[];
+    buildRegions: number[];
+    spawnRegions: number[];
+    targetMasks: number[];
+  } {
+    return {
+      actionMask: Array.from(this.obs.actionMask),
+      unitMask: Array.from(this.obs.unitMask),
+      boatRegions: Array.from(this.obs.boatRegions),
+      buildRegions: Array.from(this.obs.buildRegions),
+      spawnRegions: Array.from(this.obs.spawnRegions),
+      targetMasks: Array.from(this.obs.targetMasks),
+    };
+  }
+
+  /** True when the current observation's action would emit a core intent. */
+  wouldEmitIntent(action: ActionVec): boolean {
+    return this.translator.wouldEmitIntent(
+      this.game,
+      this.me,
+      action,
+      this.slots,
+      this.extractor.hasAdjacentWilderness(),
+    );
+  }
+
   /** Cached slot border/attack flags match a live sharesBorderWith scan. */
   slotFlagsMatchLive(): boolean {
     for (let i = 1; i < NUM_PLAYER_SLOTS; i++) {
@@ -497,6 +618,7 @@ export class AgentEnv {
   }
 
   step(action: ActionVec): StepResult {
+    const tSim = performance.now();
     const game = this.game;
     const wasAlive = this.me.isAlive();
 
@@ -633,28 +755,55 @@ export class AgentEnv {
     terms.total =
       terms.terminal + terms.spawn + terms.territory + terms.elimination;
 
+    this.lastStepMeta = {
+      reward: terms.total,
+      intentCount,
+      actionAccepted,
+      terminalCause,
+      win,
+      stageSuccess,
+      dead,
+      tilesFrac,
+      peakTilesFrac: this.peakTilesFrac,
+      kills: this.kills,
+    };
+    const simMs = performance.now() - tSim;
+    const tObs = performance.now();
+    const obs = this.extractObs();
+    this.lastProfile.simMs = simMs;
+    this.lastProfile.maskObsMs = performance.now() - tObs;
+
+    const info: StepResult["info"] = {
+      tick: game.ticks(),
+      win,
+      stageSuccess,
+      dead,
+      kills: this.kills,
+      tilesFrac,
+      spawned: this.spawnedOnce,
+      hash: this.lastHash,
+      terminalCause,
+      peakTilesFrac: this.peakTilesFrac,
+      rewardTerms: { ...terms },
+      intentCount,
+      actionAccepted,
+      map: this.cfg.map,
+      mapSize: this.cfg.mapSize,
+      seed: this.cfg.seed,
+    };
+    if (this.cfg.enableDigest) {
+      const boundary = this.strongStateDigest();
+      info.digest = boundary.digest;
+      info.tileDigest = boundary.tileDigest;
+      info.obsDigest = boundary.obsDigest;
+      info.stepDigest = boundary.stepDigest;
+    }
+
     return {
-      obs: this.extractObs(),
+      obs,
       reward: terms.total,
       done,
-      info: {
-        tick: game.ticks(),
-        win,
-        stageSuccess,
-        dead,
-        kills: this.kills,
-        tilesFrac,
-        spawned: this.spawnedOnce,
-        hash: this.lastHash,
-        terminalCause,
-        peakTilesFrac: this.peakTilesFrac,
-        rewardTerms: { ...terms },
-        intentCount,
-        actionAccepted,
-        map: this.cfg.map,
-        mapSize: this.cfg.mapSize,
-        seed: this.cfg.seed,
-      },
+      info,
     };
   }
 
@@ -662,8 +811,119 @@ export class AgentEnv {
     return this.lastHash;
   }
 
+  /**
+   * Strong decision-boundary digest: tiles, obs/masks, last step reward,
+   * intents, and terminal cause, plus the official 10-tick core hash.
+   */
+  strongStateDigest(): DecisionBoundary {
+    return computeDecisionBoundary(
+      this.game,
+      this.obs,
+      this.lastHash,
+      this.lastStepMeta,
+    );
+  }
+
   gameTicks(): number {
     return this.game.ticks();
+  }
+
+  /**
+   * Test-only unit census for oracle fixtures. Does not affect step/reset.
+   */
+  inspectActiveUnits(): Array<{
+    id: number;
+    type: string;
+    ownerIsAgent: boolean;
+    tile: number;
+    underConstruction: boolean;
+    trainStation: boolean;
+    health: number;
+  }> {
+    const meId = this.me.id();
+    const out: Array<{
+      id: number;
+      type: string;
+      ownerIsAgent: boolean;
+      tile: number;
+      underConstruction: boolean;
+      trainStation: boolean;
+      health: number;
+    }> = [];
+    for (const u of this.game.units()) {
+      if (!u.isActive()) continue;
+      const owner = u.owner();
+      out.push({
+        id: u.id(),
+        type: String(u.type()),
+        ownerIsAgent: owner.isPlayer() && owner.id() === meId,
+        tile: u.tile(),
+        underConstruction: u.isUnderConstruction(),
+        trainStation: u.hasTrainStation(),
+        health: u.health(),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Official bomb-intercept census (BOMB_INDEX_INTERCEPT across all players).
+   * Test-only; does not affect step/reset.
+   */
+  inspectBombIntercepts(): number {
+    let n = 0;
+    for (const p of this.game.allPlayers()) {
+      const stats = this.game.stats().getPlayerStats(p);
+      if (stats == null || stats.bombs === undefined) continue;
+      for (const arr of Object.values(stats.bombs)) {
+        if (arr !== undefined && arr.length > 2) {
+          n += Number(arr[2]);
+        }
+      }
+    }
+    return n;
+  }
+
+  inspectTile(tile: number): {
+    water: boolean;
+    land: boolean;
+    impassable: boolean;
+    hasOwner: boolean;
+    ownerIsAgent: boolean;
+  } {
+    const t = tile as TileRef;
+    const owner = this.game.hasOwner(t) ? this.game.owner(t) : null;
+    return {
+      water: this.game.isWater(t),
+      land: this.game.isLand(t),
+      impassable: this.game.isImpassable(t),
+      hasOwner: this.game.hasOwner(t),
+      ownerIsAgent:
+        owner !== null && owner.isPlayer() && owner.id() === this.me.id(),
+    };
+  }
+
+  findBuildRegionForUnit(unit: number): number | null {
+    const unitType = UNIT_HEAD_ORDER[unit];
+    if (unitType === undefined) return null;
+    return this.translator.findBuildRegionForUnit(this.game, this.me, unitType);
+  }
+
+  findNukeTileNearEnemySam(): { region: number; tile: number } | null {
+    for (const sam of this.game.units(UnitType.SAMLauncher)) {
+      if (!sam.isActive() || sam.isUnderConstruction()) continue;
+      const owner = sam.owner();
+      if (!owner.isPlayer() || owner.id() === this.me.id()) continue;
+      const tile = sam.tile();
+      if (this.me.canBuild(UnitType.AtomBomb, tile) === false) continue;
+      return { region: this.translator.regionOfTile(this.game, tile), tile };
+    }
+    return null;
+  }
+
+  /** Game-scoped MIRV pile-on map. Isolation tests compare two envs. */
+  recentMirvCooldownForTest(): Map<string, number> {
+    return recentMirvTargetsFor(this.game);
   }
 
   /**
